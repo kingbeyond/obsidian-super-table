@@ -1398,7 +1398,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
         : [...rows].filter((item) => root.contains(item)).flatMap((item) => [...item.querySelectorAll<HTMLTextAreaElement>("textarea.tb-auto-height")]);
       // Release every previous row-height adjustment before measuring, so rows can shrink too.
       inputs.forEach((input) => {
-        input.style.height = "auto";
+        input.setCssStyles({ height: "auto" });
         input.style.removeProperty("--tb-cell-extra-space");
       });
       // Read natural textarea and row heights together before writing final sizes.
@@ -2085,9 +2085,9 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     const grid = el("table", "tb-grid"); const fields = visibleFields(table, currentView());
     grid.style.width = `${fields.reduce((sum, field) => sum + (field.width ?? defaultFieldWidth(field.type)), 0) + 34 + (selectionMode ? 42 : 0)}px`;
     const columns = el("colgroup");
-    if (selectionMode) { const col = el("col"); col.style.width = "42px"; columns.append(col); }
+    if (selectionMode) { const col = el("col"); col.setCssStyles({ width: "42px" }); columns.append(col); }
     fields.forEach((field) => { const col = el("col"); col.dataset.fieldId = field.id; col.style.width = `${field.width ?? defaultFieldWidth(field.type)}px`; columns.append(col); });
-    const trailing = el("col"); trailing.style.width = "34px"; columns.append(trailing, el("col", "tb-grid-fill-col")); grid.append(columns);
+    const trailing = el("col"); trailing.setCssStyles({ width: "34px" }); columns.append(trailing, el("col", "tb-grid-fill-col")); grid.append(columns);
     const head = el("thead"); const headings = el("tr");
     if (selectionMode) {
       const cell = el("th", "tb-select-cell"); const check = el("input"); check.type = "checkbox";
@@ -2138,7 +2138,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     };
     const nameLabel = hiddenAccessibleLabel(t("Column name: {name}", { name: field.name }));
     name.setAttribute("aria-labelledby", nameLabel.id); name.style.textAlign = field.align || "left";
-    name.oninput = () => { name.style.height = "auto"; name.style.height = `${name.scrollHeight}px`; context.onLayout?.(); };
+    name.oninput = () => { name.setCssStyles({ height: "auto" }); name.style.height = `${name.scrollHeight}px`; context.onLayout?.(); };
     name.onchange = () => void commit((next) => { next.fields.find((item) => item.id === field.id)!.name = name.value; });
     name.onblur = () => {
       if (editingHeaderId === field.id) {
@@ -2150,7 +2150,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
       if (name.readOnly && (event.key === "Enter" || event.key === " ")) {
         event.preventDefault(); editHeaderName(field.id, th, name);
       } else if (!name.readOnly && event.key === "Escape") {
-        event.preventDefault(); name.value = field.name; name.style.height = "auto"; name.style.height = `${name.scrollHeight}px`;
+        event.preventDefault(); name.value = field.name; name.setCssStyles({ height: "auto" }); name.style.height = `${name.scrollHeight}px`;
         editingHeaderId = undefined; name.readOnly = true; context.onLayout?.();
       }
     };

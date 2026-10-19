@@ -44,7 +44,7 @@ export const en = {
   "Open Filter in the toolbar to configure the imported view's conditions.": "Open Filter in the toolbar to configure the imported view's conditions.",
   "Switching to attachments will clear {values} cell value(s) and {conditions} filter condition(s) in {views} view(s). Save again to confirm.": "Switching to attachments will clear {values} cell value(s) and {conditions} filter condition(s) in {views} view(s). Save again to confirm.",
   "Some values or filters will be cleared. {values} cell value(s) and {conditions} filter condition(s) in {views} view(s) are affected. Save again to confirm.": "Some values or filters will be cleared. {values} cell value(s) and {conditions} filter condition(s) in {views} view(s) are affected. Save again to confirm.",
-  "Create editable data tables in Obsidian with typed fields, date formats, grouping, and multiple named views over shared records.": "Create editable data tables in Obsidian with typed fields, date formats, grouping, and multiple named views over shared records.",
+  "Create editable data tables with typed fields, date formats, grouping, and multiple named views over shared records.": "Create editable data tables with typed fields, date formats, grouping, and multiple named views over shared records.",
   "Text": "Text",
   "URL": "URL",
   "Number": "Number",

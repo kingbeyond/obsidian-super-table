@@ -38,6 +38,8 @@ Super Table 在 Obsidian 笔记中提供可编辑的数据表，支持类型化�
 
 ## 安装
 
+从 1.0.1 起，需要 Obsidian 1.8.7 或更新版本。
+
 Super Table 尚未收录到社区插件目录，可先手动安装：
 
 1. 从[最新 Release](https://github.com/kingbeyond/obsidian-super-table/releases/latest) 下载 `main.js`、`manifest.json` 和 `styles.css`。

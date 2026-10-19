@@ -730,6 +730,9 @@ test("[table-block] live preview replaces a thousand-record multiline block as o
 });
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "https://local.test", pretendToBeVisual: true });
+Object.defineProperty(dom.window.HTMLElement.prototype, "setCssStyles", {
+  value(this: HTMLElement, styles: Partial<CSSStyleDeclaration>) { Object.assign(this.style, styles); },
+});
 for (const name of ["window", "document", "Node", "HTMLElement", "Element", "HTMLInputElement", "HTMLTextAreaElement", "HTMLSpanElement", "MouseEvent", "KeyboardEvent", "DOMException", "File"])
   Object.defineProperty(globalThis, name, { configurable: true, value: (dom.window as any)[name] });
 Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
@@ -5291,8 +5294,8 @@ test("[localization][table-block] plugin startup follows Obsidian language for c
       assert.equal(getLocale(), chinese ? "zh-CN" : "en");
       assert.equal(ribbonLabel, chinese ? "插入 Super Table" : "Insert Super Table");
       assert.equal(plugin.manifest.description, chinese
-        ? "在 Obsidian 笔记中创建可编辑的数据表，设置字段类型和日期格式、按字段分组，并为同一批记录创建多个命名视图。"
-        : "Create editable data tables in Obsidian with typed fields, date formats, grouping, and multiple named views over shared records.");
+        ? "创建可编辑的数据表，设置字段类型和日期格式、按字段分组，并为同一批记录创建多个命名视图。"
+        : "Create editable data tables with typed fields, date formats, grouping, and multiple named views over shared records.");
       assert.deepEqual(registeredLanguages, ["super-table"]);
       assert.deepEqual(commands.map((command) => command.id), ["insert-table", "import-smart-table", "convert-markdown-table", "convert-super-table-to-markdown"]);
       assert.deepEqual(commands.map((command) => command.name), chinese

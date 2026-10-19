@@ -4,6 +4,8 @@
 
 Try the [example tables](examples/README.md) in your vault.
 
+Version 1.0.1 and later require Obsidian 1.8.7 or newer.
+
 ## Creating and viewing tables
 
 In note editing mode, run **Super Table: Insert table** or click the table button in the ribbon. You can also type an empty code block:
@@ -46,7 +48,7 @@ Embed images with `![[image.png]]`. Wikilink embeds for notes, PDFs, audio, and 
 Set a column's type to **Attachments**, select a cell, and click its dropdown button to open the attachment panel.
 
 - **Add vault files**: Choose **Add attachment**, search and select files, then choose **Add selected**. A cell can reference multiple files.
-- **Import from device**: Copy files to Obsidian's configured attachment folder. Requires Obsidian 1.5.7 or newer.
+- **Import from device**: Copy files to Obsidian's configured attachment folder.
 - **Paste an image**: Copy an image, select an attachment cell or leave its panel open, and press `Cmd/Ctrl+V`.
 
 In **Settings → Community plugins → Super Table → Attachment image paste location**, choose Obsidian's attachment settings or `附件/<note name>/` beside the note. This affects pasted images only. Pasting requires image data in the clipboard; an image URL alone is not downloaded.

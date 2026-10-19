@@ -45,7 +45,7 @@ export const zhCN: Record<MessageKey, string> = {
   "Open Filter in the toolbar to configure the imported view's conditions.": "可点击工具栏的“筛选”配置导入视图的条件。",
   "Switching to attachments will clear {values} cell value(s) and {conditions} filter condition(s) in {views} view(s). Save again to confirm.": "转换为附件将清除 {values} 个单元格值及 {views} 个视图中的 {conditions} 条筛选条件。再次点击确认修改以继续。",
   "Some values or filters will be cleared. {values} cell value(s) and {conditions} filter condition(s) in {views} view(s) are affected. Save again to confirm.": "部分值或筛选条件会被清除：{values} 个单元格值及 {views} 个视图中的 {conditions} 条筛选条件。再次点击确认修改以继续。",
-  "Create editable data tables in Obsidian with typed fields, date formats, grouping, and multiple named views over shared records.": "在 Obsidian 笔记中创建可编辑的数据表，设置字段类型和日期格式、按字段分组，并为同一批记录创建多个命名视图。",
+  "Create editable data tables with typed fields, date formats, grouping, and multiple named views over shared records.": "创建可编辑的数据表，设置字段类型和日期格式、按字段分组，并为同一批记录创建多个命名视图。",
   "Text": "文本",
   "URL": "链接",
   "Number": "数字",

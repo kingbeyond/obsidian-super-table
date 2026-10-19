@@ -99,12 +99,12 @@ export default class SuperTablePlugin extends Plugin {
   }
 
   async onload(): Promise<void> {
-    // getLanguage is public since Obsidian 1.8.7; older supported apps store the same setting locally.
+    // Keep the local-setting fallback if the host cannot provide getLanguage.
     let language = "en";
     try { language = typeof getLanguage === "function" ? getLanguage() : window.localStorage.getItem("language") || "en"; } catch { /* Default to English if settings cannot be read. */ }
     setLanguage(language);
     this.settings = normalizeSuperTableSettings(await this.loadData());
-    this.manifest.description = t("Create editable data tables in Obsidian with typed fields, date formats, grouping, and multiple named views over shared records.");
+    this.manifest.description = t("Create editable data tables with typed fields, date formats, grouping, and multiple named views over shared records.");
     this.addSettingTab(new SuperTableSettingTab(this.app, this));
     this.registerEditorExtension(tableEditorExtension(this));
     this.registerMarkdownCodeBlockProcessor(TABLE_CODE_BLOCK_LANGUAGE, (source, element, context) => {
