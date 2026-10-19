@@ -741,6 +741,19 @@ Object.defineProperty(dom.window.navigator, "clipboard", { configurable: true, v
 Object.defineProperty(globalThis, "requestAnimationFrame", { configurable: true, value: (callback: () => void) => setTimeout(callback, 0) });
 Object.defineProperty(globalThis, "cancelAnimationFrame", { configurable: true, value: clearTimeout });
 const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
+test("[attachments][localization] plugin preferences keep their saved shape and stay separate from host settings", async () => {
+  setObsidianLanguage("en");
+  const plugin = new SuperTablePlugin({ workspace: { on: () => ({}), getActiveViewOfType: () => null } } as any, {} as any);
+  const hostSettings = { hostOnly: true };
+  plugin.settings = hostSettings;
+  plugin.data = { attachmentImagePasteLocation: "note-folder" };
+  await plugin.onload();
+  assert.equal(plugin.superTableSettings.attachmentImagePasteLocation, "note-folder");
+  plugin.superTableSettings.attachmentImagePasteLocation = "obsidian";
+  await plugin.saveSettings();
+  assert.deepEqual(plugin.data, { attachmentImagePasteLocation: "obsidian" });
+  assert.equal(plugin.settings, hostSettings);
+});
 async function waitForCondition(condition: () => boolean, description: string, timeoutMs = 1500): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!condition()) {
@@ -2519,7 +2532,7 @@ test("[attachments] clipboard image paste defaults to Obsidian's folder and appe
   const files = new Map<string, TFile>([["Assets/existing.pdf", new TFile("Assets/existing.pdf")]]);
   const pathCalls: Array<[string, string | undefined]> = [];
   let createdPath = ""; let createdBytes: number[] = []; let saved: TableDocument | null = null;
-  const plugin = { settings: normalizeSuperTableSettings(undefined), app: {
+  const plugin = { superTableSettings: normalizeSuperTableSettings(undefined), app: {
     fileManager: { getAvailablePathForAttachment: async (name: string, sourcePath?: string) => {
       pathCalls.push([name, sourcePath]); return `Attachments/${name}`;
     } },
@@ -2557,7 +2570,7 @@ test("[attachments] clipboard image paste works while the attachment panel is op
   const field: Field = { id: "pasted-files-panel", name: "Files", type: "attachment", width: 220 };
   table.fields.push(field);
   const files = new Map<string, TFile>(); let createdPath = ""; let saved: TableDocument | null = null;
-  const plugin = { settings: normalizeSuperTableSettings(undefined), app: {
+  const plugin = { superTableSettings: normalizeSuperTableSettings(undefined), app: {
     fileManager: { getAvailablePathForAttachment: async (name: string) => `Attachments/${name}` },
     vault: {
       getAbstractFileByPath: (path: string) => files.get(path) ?? null,
@@ -2624,7 +2637,7 @@ test("[attachments] clipboard image paste can create a note-named sibling folder
   ]);
   const folders = new Set(["Fitness"]); const createdFolders: string[] = [];
   let pathCalls = 0; let createdPath = ""; let createdBytes: number[] = []; let saved: TableDocument | null = null;
-  const plugin = { settings: { attachmentImagePasteLocation: "note-folder" }, app: {
+  const plugin = { superTableSettings: { attachmentImagePasteLocation: "note-folder" }, app: {
     fileManager: { getAvailablePathForAttachment: async () => { pathCalls++; return "ObsidianSetting/should-not-use.png"; } },
     vault: {
       getAbstractFileByPath: (path: string) => files.get(path) ?? (folders.has(path) ? { path } : null),
@@ -2661,7 +2674,7 @@ test("[attachments] URL-only clipboard data is not downloaded and failed image w
   const field: Field = { id: "pasted-files-fail", name: "Files", type: "attachment", width: 220 };
   table.fields.push(field);
   let pathCalls = 0; let binaryCalls = 0; let saved: TableDocument | null = null;
-  const plugin = { settings: normalizeSuperTableSettings(undefined), app: {
+  const plugin = { superTableSettings: normalizeSuperTableSettings(undefined), app: {
     fileManager: { getAvailablePathForAttachment: async () => { pathCalls++; return "Attachments/photo.png"; } },
     vault: {
       getAbstractFileByPath: () => null, getFiles: () => [], getResourcePath: () => "",
@@ -2693,7 +2706,7 @@ test("[attachments] Obsidian-location paste gives a compatibility notice when it
   const field: Field = { id: "pasted-files-old-api", name: "Files", type: "attachment", width: 220 };
   table.fields.push(field);
   let creates = 0; let saved: TableDocument | null = null;
-  const plugin = { settings: normalizeSuperTableSettings(undefined), app: {
+  const plugin = { superTableSettings: normalizeSuperTableSettings(undefined), app: {
     vault: {
       getAbstractFileByPath: () => null, getFiles: () => [], getResourcePath: () => "",
       createBinary: async () => { creates++; return new TFile("unused.png"); },

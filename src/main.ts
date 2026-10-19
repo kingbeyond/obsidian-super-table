@@ -92,10 +92,11 @@ function applyEditorTextUpdate(editor: MarkdownView["editor"], before: string, a
 }
 
 export default class SuperTablePlugin extends Plugin {
-  settings: SuperTableSettings = { ...DEFAULT_SETTINGS };
+  // Keep plugin preferences separate from Plugin.settings, introduced in Obsidian 1.13.0.
+  superTableSettings: SuperTableSettings = { ...DEFAULT_SETTINGS };
 
   async saveSettings(): Promise<void> {
-    await this.saveData(this.settings);
+    await this.saveData(this.superTableSettings);
   }
 
   async onload(): Promise<void> {
@@ -103,7 +104,7 @@ export default class SuperTablePlugin extends Plugin {
     let language = "en";
     try { language = typeof getLanguage === "function" ? getLanguage() : window.localStorage.getItem("language") || "en"; } catch { /* Default to English if settings cannot be read. */ }
     setLanguage(language);
-    this.settings = normalizeSuperTableSettings(await this.loadData());
+    this.superTableSettings = normalizeSuperTableSettings(await this.loadData());
     this.manifest.description = t("Create editable data tables with typed fields, date formats, grouping, and multiple named views over shared records.");
     this.addSettingTab(new SuperTableSettingTab(this.app, this));
     this.registerEditorExtension(tableEditorExtension(this));
@@ -222,9 +223,9 @@ class SuperTableSettingTab extends PluginSettingTab {
       .addDropdown((dropdown) => dropdown
         .addOption("obsidian", t("Use Obsidian attachment settings"))
         .addOption("note-folder", t("Use sibling 附件/<note name>/ folder"))
-        .setValue(this.plugin.settings.attachmentImagePasteLocation)
+        .setValue(this.plugin.superTableSettings.attachmentImagePasteLocation)
         .onChange(async (value) => {
-          this.plugin.settings.attachmentImagePasteLocation = value === "note-folder" ? "note-folder" : "obsidian";
+          this.plugin.superTableSettings.attachmentImagePasteLocation = value === "note-folder" ? "note-folder" : "obsidian";
           await this.plugin.saveSettings();
         }));
   }

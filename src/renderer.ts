@@ -4000,7 +4000,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
   const addPastedImageToAttachment = async (image: File, selection: { rowId: string; fieldId: string }, keepPanelOpen = false): Promise<void> => {
     const fileName = pastedImageFileName(image.name, image.type);
     try {
-      const settings = (plugin as Plugin & { settings?: SuperTableSettings }).settings;
+      const settings = (plugin as Plugin & { superTableSettings?: SuperTableSettings }).superTableSettings;
       const location = settings?.attachmentImagePasteLocation ?? "obsidian";
       const data = await image.arrayBuffer();
       let imported: TFile | null;
