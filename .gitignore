@@ -1,0 +1,5 @@
+node_modules/
+/.local/
+/main.js
+.DS_Store
+npm-debug.log*
