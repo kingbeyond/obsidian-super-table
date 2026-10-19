@@ -329,7 +329,7 @@ export async function applyReadingViewTableHistory(
 ): Promise<string | null> {
   const history = readingViewHistory.get(sourcePath);
   const from = history?.[direction];
-  const entry = from?.at(-1);
+  const entry = from?.[from.length - 1];
   if (!history || !from || !entry || readingViewHistoryActionsInFlight.has(sourcePath)) return null;
   const file = plugin.app.vault.getAbstractFileByPath(sourcePath);
   if (!(file instanceof TFile) || !plugin.app.vault.process) throw new Error(t("This Obsidian version does not provide safe note updates."));

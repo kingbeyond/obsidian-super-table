@@ -222,7 +222,7 @@ export function nextOptionColor(optionCount: number): string {
 }
 
 export function makeId(prefix = "id"): string {
-  const random = globalThis.crypto?.randomUUID?.().replace(/-/g, "") ?? Math.random().toString(36).slice(2);
+  const random = window.crypto?.randomUUID?.().replace(/-/g, "") ?? Math.random().toString(36).slice(2);
   return `${prefix}-${random.slice(0, 14)}`;
 }
 
@@ -401,7 +401,7 @@ function coerceCell(field: Field, value: unknown, path: string): CellValue {
   if (typeof value !== "string" && typeof value !== "boolean" && !(typeof value === "number" && Number.isFinite(value))) invalidStoredData(path);
   if (field.type === "number") {
     if (typeof value === "boolean") invalidStoredData(path);
-    return value as number | string;
+    return value;
   }
   if (field.type === "select" || field.type === "status") {
     const text = String(value ?? "");

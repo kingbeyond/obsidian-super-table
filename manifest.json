@@ -1,7 +1,7 @@
 {
   "id": "super-table",
   "name": "Super Table",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "minAppVersion": "1.8.7",
   "description": "Create editable data tables with typed fields, date formats, grouping, and multiple named views over shared records.",
   "author": "kingbeyond",

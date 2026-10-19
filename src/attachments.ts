@@ -1,12 +1,12 @@
-import { App, Modal, Notice, TFile } from "obsidian";
+import { App, Modal, TFile } from "obsidian";
 import { t } from "./i18n";
 import { node as el, control, icon } from "./ui";
 
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "svg"]);
-function attachmentName(path: string): string { return path.split("/").filter(Boolean).at(-1) ?? path; }
-function isImage(path: string): boolean { return IMAGE_EXTENSIONS.has(path.split(".").at(-1)?.toLowerCase() ?? ""); }
+function attachmentName(path: string): string { return path.split("/").filter(Boolean).pop() ?? path; }
+function isImage(path: string): boolean { return IMAGE_EXTENSIONS.has(path.split(".").pop()?.toLowerCase() ?? ""); }
 export function attachmentIcon(path: string): string {
-  const extension = path.split(".").at(-1)?.toLowerCase() ?? "";
+  const extension = path.split(".").pop()?.toLowerCase() ?? "";
   if (isImage(path)) return "image";
   if (extension === "pdf") return "file-text";
   if (["mp3", "wav", "ogg", "m4a", "flac", "aac"].includes(extension)) return "music-2";

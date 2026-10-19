@@ -131,7 +131,7 @@ export function safeMarkdownEmbeds(markdown: string): string {
           const embed = line.slice(index, end + 2);
           const raw = line.slice(index + 3, end);
           const path = raw.split(/[|#]/, 1)[0].trim();
-          const extension = path.split(".").at(-1)?.toLowerCase() ?? "";
+          const extension = path.split(".").pop()?.toLowerCase() ?? "";
           result += IMAGE_EXTENSIONS.has(extension) ? embed : embed.slice(1);
           index = end + 2; continue;
         }

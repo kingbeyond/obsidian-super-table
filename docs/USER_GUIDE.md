@@ -53,6 +53,8 @@ Set a column's type to **Attachments**, select a cell, and click its dropdown bu
 
 In **Settings → Community plugins → Super Table → Attachment image paste location**, choose Obsidian's attachment settings or `附件/<note name>/` beside the note. This affects pasted images only. Pasting requires image data in the clipboard; an image URL alone is not downloaded.
 
+On Obsidian 1.13.0 or newer, this option is also available through settings search. Earlier supported versions continue to use the plugin settings page.
+
 Click images to preview, browse, and zoom. Other attachments open through Obsidian.
 
 An attachment's `×` removes its reference without deleting the file. Files created by importing or pasting also remain if selection is canceled or saving fails.

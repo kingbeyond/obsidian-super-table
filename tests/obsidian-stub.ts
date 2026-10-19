@@ -1,4 +1,94 @@
 import { StateField } from "@codemirror/state";
+
+interface DomElementInfo {
+  cls?: string | string[];
+  text?: string | DocumentFragment;
+  attr?: Record<string, string | number | boolean | null>;
+  title?: string;
+  parent?: Node;
+  value?: string;
+  type?: string;
+  prepend?: boolean;
+  placeholder?: string;
+  href?: string;
+}
+
+type ElementCallback<K extends keyof HTMLElementTagNameMap> = (element: HTMLElementTagNameMap[K]) => void;
+
+function elementOptions(options?: DomElementInfo | string): DomElementInfo {
+  return typeof options === "string" ? { cls: options } : options ?? {};
+}
+
+function createElement<K extends keyof HTMLElementTagNameMap>(
+  doc: Document,
+  tag: K,
+  options?: DomElementInfo | string,
+  callback?: ElementCallback<K>,
+  defaultParent?: Node,
+): HTMLElementTagNameMap[K] {
+  const element = doc.createElement(tag);
+  const settings = elementOptions(options);
+  if (settings.cls) element.className = Array.isArray(settings.cls) ? settings.cls.join(" ") : settings.cls;
+  if (settings.text instanceof doc.defaultView!.DocumentFragment) element.append(settings.text);
+  else if (settings.text !== undefined) element.textContent = settings.text;
+  if (settings.title !== undefined) element.title = settings.title;
+  if (settings.value !== undefined && "value" in element) (element as HTMLInputElement).value = settings.value;
+  if (settings.type !== undefined && "type" in element) (element as HTMLInputElement).type = settings.type;
+  if (settings.placeholder !== undefined && "placeholder" in element) (element as HTMLInputElement).placeholder = settings.placeholder;
+  if (settings.href !== undefined && "href" in element) (element as HTMLAnchorElement).href = settings.href;
+  for (const [name, value] of Object.entries(settings.attr ?? {})) {
+    if (value === null || value === false) element.removeAttribute(name);
+    else element.setAttribute(name, value === true ? "" : String(value));
+  }
+  const parent = settings.parent ?? defaultParent;
+  if (parent) {
+    if (settings.prepend) parent.prepend(element);
+    else parent.append(element);
+  }
+  callback?.(element);
+  return element;
+}
+
+/** Install the DOM construction helpers exposed by Obsidian's renderer API. */
+export function installObsidianDomHelpers(doc: Document): void {
+  const view = doc.defaultView;
+  if (!view) throw new Error("The Obsidian DOM test helpers need a document with a window.");
+
+  const createGlobalEl = <K extends keyof HTMLElementTagNameMap>(tag: K, options?: DomElementInfo | string, callback?: ElementCallback<K>) =>
+    createElement(doc, tag, options, callback);
+  const createGlobalDiv = (options?: DomElementInfo | string, callback?: ElementCallback<"div">) => createGlobalEl("div", options, callback);
+  const createGlobalSpan = (options?: DomElementInfo | string, callback?: ElementCallback<"span">) => createGlobalEl("span", options, callback);
+  const createFragment = (callback?: (fragment: DocumentFragment) => void) => {
+    const fragment = doc.createDocumentFragment();
+    callback?.(fragment);
+    return fragment;
+  };
+
+  Object.assign(globalThis, {
+    createEl: createGlobalEl,
+    createDiv: createGlobalDiv,
+    createSpan: createGlobalSpan,
+    createFragment,
+    activeDocument: doc,
+    activeWindow: view,
+  });
+
+  const prototype = view.Node.prototype as Node & {
+    createEl?: <K extends keyof HTMLElementTagNameMap>(tag: K, options?: DomElementInfo | string, callback?: ElementCallback<K>) => HTMLElementTagNameMap[K];
+    createDiv?: (options?: DomElementInfo | string, callback?: ElementCallback<"div">) => HTMLDivElement;
+    createSpan?: (options?: DomElementInfo | string, callback?: ElementCallback<"span">) => HTMLSpanElement;
+  };
+  prototype.createEl = function <K extends keyof HTMLElementTagNameMap>(tag: K, options?: DomElementInfo | string, callback?: ElementCallback<K>) {
+    return createElement(this.ownerDocument ?? doc, tag, options, callback, this);
+  };
+  prototype.createDiv = function (options?: DomElementInfo | string, callback?: ElementCallback<"div">) {
+    return this.createEl!("div", options, callback);
+  };
+  prototype.createSpan = function (options?: DomElementInfo | string, callback?: ElementCallback<"span">) {
+    return this.createEl!("span", options, callback);
+  };
+}
+
 export const Platform = { isDesktop: true, isMobile: false };
 export async function requestUrl(_request: unknown): Promise<{ status: number; text: string; headers: Record<string, string> }> {
   return { status: 404, text: "", headers: {} };
@@ -40,12 +130,13 @@ class TestDropdown {
   setValue(value: string) { this.value = value; return this; }
   onChange(callback: (value: string) => unknown) { this.change = callback; return this; }
 }
+export const createdSettings: Setting[] = [];
 export class Setting {
   readonly settingEl = document.createElement("div");
   name = "";
   description = "";
   dropdown?: TestDropdown;
-  constructor(container: HTMLElement) { container.append(this.settingEl); }
+  constructor(container: HTMLElement) { container.append(this.settingEl); createdSettings.push(this); }
   setName(name: string) { this.name = name; return this; }
   setDesc(description: string) { this.description = description; return this; }
   addDropdown(callback: (dropdown: TestDropdown) => unknown) { this.dropdown = new TestDropdown(); callback(this.dropdown); return this; }

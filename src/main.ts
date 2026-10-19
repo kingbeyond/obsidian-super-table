@@ -1,5 +1,6 @@
 import { errorMessage, setLanguage, t } from "./i18n";
 import { App, getLanguage, MarkdownRenderChild, MarkdownView, Menu, Notice, Plugin, PluginSettingTab, Setting } from "obsidian";
+import type { SettingDefinitionItem } from "obsidian";
 import { createDefaultTable, TableDocument } from "./model";
 import { applyMarkdownExportToNote, insertBlockAfter, readTable, readTableId, scanFencedBlocks, serializeTable, TABLE_CODE_BLOCK_LANGUAGE } from "./storage";
 import { confirmMarkdownReplacement, renderTable, showImportPreview } from "./renderer";
@@ -100,8 +101,8 @@ export default class SuperTablePlugin extends Plugin {
   }
 
   async onload(): Promise<void> {
-    // Keep the local-setting fallback if the host cannot provide getLanguage.
     let language = "en";
+    // Retain the existing language choice if a host fails to expose its public API.
     try { language = typeof getLanguage === "function" ? getLanguage() : window.localStorage.getItem("language") || "en"; } catch { /* Default to English if settings cannot be read. */ }
     setLanguage(language);
     this.superTableSettings = normalizeSuperTableSettings(await this.loadData());
@@ -109,13 +110,13 @@ export default class SuperTablePlugin extends Plugin {
     this.addSettingTab(new SuperTableSettingTab(this.app, this));
     this.registerEditorExtension(tableEditorExtension(this));
     this.registerMarkdownCodeBlockProcessor(TABLE_CODE_BLOCK_LANGUAGE, (source, element, context) => {
-      const plugin = this;
+      const createController = () => renderTable(this, source, {
+        sourcePath: context.sourcePath, root: element, emptySection: () => context.getSectionInfo(element),
+      });
       class TableChild extends MarkdownRenderChild {
         controller?: ReturnType<typeof renderTable>;
         onload(): void {
-          this.controller = renderTable(plugin, source, {
-            sourcePath: context.sourcePath, root: element, emptySection: () => context.getSectionInfo(element),
-          });
+          this.controller = createController();
         }
         onunload(): void { this.controller?.destroy(); }
       }
@@ -214,6 +215,31 @@ export default class SuperTablePlugin extends Plugin {
 
 class SuperTableSettingTab extends PluginSettingTab {
   constructor(app: App, private readonly plugin: SuperTablePlugin) { super(app, plugin); }
+
+  // New hosts use these definitions for rendering/search; older hosts retain display().
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    return [{
+      name: t("Attachment image paste location"),
+      desc: t("Choose where images pasted into attachment cells are saved. This does not affect device imports."),
+      control: {
+        type: "dropdown", key: "attachmentImagePasteLocation", defaultValue: "obsidian",
+        options: {
+          obsidian: t("Use Obsidian attachment settings"),
+          "note-folder": t("Use sibling 附件/<note name>/ folder"),
+        },
+      },
+    }];
+  }
+
+  getControlValue(key: string): unknown {
+    return key === "attachmentImagePasteLocation" ? this.plugin.superTableSettings.attachmentImagePasteLocation : undefined;
+  }
+
+  async setControlValue(key: string, value: unknown): Promise<void> {
+    if (key !== "attachmentImagePasteLocation") return;
+    this.plugin.superTableSettings.attachmentImagePasteLocation = value === "note-folder" ? "note-folder" : "obsidian";
+    await this.plugin.saveSettings();
+  }
 
   display(): void {
     this.containerEl.replaceChildren();

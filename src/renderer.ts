@@ -633,7 +633,7 @@ function preserveNoteViewportScroll(
   const anchorRowId = useTableHeaderAnchor ? undefined : anchorCell?.parentElement?.dataset.rowId;
   const anchorFieldId = useTableHeaderAnchor ? undefined : anchorCell?.dataset.fieldId;
   const anchorTop = useTableHeaderAnchor
-    ? (headerFullyVisible ? columnHeaderBounds!.top : fallbackHeaderTop)
+    ? (headerFullyVisible ? columnHeaderBounds.top : fallbackHeaderTop)
     : (anchorCell ?? root).getBoundingClientRect().top;
   const tableScrollLeft = root.querySelector<HTMLElement>(".tb-table-scroll")?.scrollLeft ?? 0;
 
@@ -936,7 +936,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
   let observedGrid: HTMLElement | null = null;
   let viewportScrollElement: HTMLElement | null = null;
   let proxyResizeObserver: ResizeObserver | null = null;
-  const viewportWindow = root.ownerDocument.defaultView;
+  const viewportWindow = root.ownerDocument.defaultView ?? window;
 
   function releaseMarkdownCell(cell: HTMLTableCellElement): void {
     const component = markdownComponents.get(cell);
@@ -1077,14 +1077,9 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     return true;
   }
 
-  function refreshCellActions(cell: HTMLTableCellElement): void {
-    clearCellActions(cell);
-    ensureCellActions(cell);
-  }
-
   function scheduleProxyUpdate(): void {
     if (proxyFrame !== null) return;
-    proxyFrame = requestAnimationFrame(() => { proxyFrame = null; updateProxy(); });
+    proxyFrame = viewportWindow.requestAnimationFrame(() => { proxyFrame = null; updateProxy(); });
   }
 
   function bindViewportScrollElement(element: HTMLElement | null): void {
@@ -1370,8 +1365,8 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
   let pendingLayoutRows: Set<HTMLTableRowElement> | null = new Set();
   function armLayoutResizeSuppression(): void {
     suppressNextLayoutResize = true;
-    if (layoutResizeSuppressionFrame !== null) cancelAnimationFrame(layoutResizeSuppressionFrame);
-    layoutResizeSuppressionFrame = requestAnimationFrame(() => {
+    if (layoutResizeSuppressionFrame !== null) viewportWindow.cancelAnimationFrame(layoutResizeSuppressionFrame);
+    layoutResizeSuppressionFrame = viewportWindow.requestAnimationFrame(() => {
       layoutResizeSuppressionFrame = null;
       suppressNextLayoutResize = false;
     });
@@ -1379,7 +1374,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
   function consumeLayoutResizeSuppression(): boolean {
     if (!suppressNextLayoutResize) return false;
     suppressNextLayoutResize = false;
-    if (layoutResizeSuppressionFrame !== null) cancelAnimationFrame(layoutResizeSuppressionFrame);
+    if (layoutResizeSuppressionFrame !== null) viewportWindow.cancelAnimationFrame(layoutResizeSuppressionFrame);
     layoutResizeSuppressionFrame = null;
     return true;
   }
@@ -1388,7 +1383,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
       if (pendingLayoutRows) pendingLayoutRows.add(row);
     } else pendingLayoutRows = null;
     if (layoutFrame !== null) return;
-    layoutFrame = requestAnimationFrame(() => {
+    layoutFrame = viewportWindow.requestAnimationFrame(() => {
       layoutFrame = null;
       if (destroyed || !root.isConnected) return;
       const rows = pendingLayoutRows;
@@ -2071,7 +2066,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     const bar = el("div", "tb-selection-bar"); const rows = selected();
     bar.append(el("span", "tb-selection-count", t("{count} selected", { count: rows.length })));
     const actions: Array<[string, string, () => unknown]> = [
-      [t("Duplicate"), "copy", () => commit((next) => rows.forEach((row) => next.records.push({ id: makeId("row"), values: JSON.parse(JSON.stringify(row.values)) })))],
+      [t("Duplicate"), "copy", () => commit((next) => rows.forEach((row) => next.records.push({ id: makeId("row"), values: JSON.parse(JSON.stringify(row.values)) as Record<string, CellValue> })))],
       [t("Copy"), "clipboard-copy", () => copyRows(rows)],
       [t("Export"), "download", () => exportCsv("current", rows)],
       [t("Delete"), "trash", () => deleteRows(rows)],
@@ -2804,12 +2799,12 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     const insertAdjacent = (offset: number) => {
       const values = Object.fromEntries(table.fields.map((field) => [field.id, defaultCell(field.type)]));
       const groupedField = currentView().group?.fieldId;
-      if (groupedField) values[groupedField] = JSON.parse(JSON.stringify(row.values[groupedField] ?? ""));
+      if (groupedField) values[groupedField] = JSON.parse(JSON.stringify(row.values[groupedField] ?? "")) as CellValue;
       return insertRow(position + offset, values, { reveal: true });
     };
     menuAction(menu, t("Insert row above"), "arrow-up", () => insertAdjacent(0));
     menuAction(menu, t("Insert row below"), "arrow-down", () => insertAdjacent(1)); menu.addSeparator();
-    menuAction(menu, t("Duplicate row"), "copy", () => commit((next) => { next.records.splice(position + 1, 0, { id: makeId("row"), values: JSON.parse(JSON.stringify(row.values)) }); }));
+    menuAction(menu, t("Duplicate row"), "copy", () => commit((next) => { next.records.splice(position + 1, 0, { id: makeId("row"), values: JSON.parse(JSON.stringify(row.values)) as Record<string, CellValue> }); }));
     menuAction(menu, t("Copy row"), "clipboard-copy", () => copyRows([row]));
     menuAction(menu, t("Paste row"), "clipboard-paste", () => { if (copiedRow) void pasteRowIntoRow(row.id, copiedRow); }, !copiedRow);
     menu.addSeparator();
@@ -2883,7 +2878,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     // Keep keyboard shortcuts in the live-preview editor after the toolbar/menu is rerendered.
     if (context.save) root.focus({ preventScroll: true });
     if (!options.reveal) return;
-    requestAnimationFrame(() => {
+    viewportWindow.requestAnimationFrame(() => {
       if (destroyed || !root.isConnected) return;
       const element = rowElementsById.get(rowId);
       if (!element) {
@@ -2899,7 +2894,10 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     const field = table.fields.find((item) => item.id === currentView().group?.fieldId); if (!field) return;
     const values = Object.fromEntries(table.fields.map((item) => [item.id, defaultCell(item.type)]));
     if (field.type === "multiselect" || field.type === "attachment") {
-      try { values[field.id] = JSON.parse(group.key); } catch { values[field.id] = []; }
+      try {
+        const parsed: unknown = JSON.parse(group.key);
+        values[field.id] = Array.isArray(parsed) && parsed.every((value: unknown) => typeof value === "string") ? parsed : [];
+      } catch { values[field.id] = []; }
     } else if (field.type === "date") {
       const source = group.rows.find((row) => row.values[field.id] != null && row.values[field.id] !== "");
       if (source) values[field.id] = cloneValue(source.values[field.id]);
@@ -3054,7 +3052,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     edit.setAttribute("role", "menuitem");
     edit.onclick = () => {
       closeMultiSelectPicker();
-      editColumn(field);
+      void editColumn(field).catch(report);
     };
     [add, edit].forEach((button) => {
       button.removeAttribute("aria-label");
@@ -3168,8 +3166,8 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     const save = (value: CellValue) => commit((next) => { next.records.find((item) => item.id === row.id)!.values[field.id] = value; }, { rowId: row.id, fieldId: field.id });
     (field.options ?? []).forEach((option) => {
       const selected = current === option.id;
-      const title = anchor.ownerDocument.createDocumentFragment();
-      const label = anchor.ownerDocument.createElement("span");
+      const title = anchor.ownerDocument.adoptNode(createFragment());
+      const label = title.createSpan();
       if (!selected) label.className = "tb-choice-option-unselected";
       label.textContent = option.label;
       title.append(label);
@@ -3305,7 +3303,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
         const nodes: HTMLElement[] = [];
         if (pill) {
           const clear = control("", "x", "tb-icon-button tb-choice-remove"); clear.setAttribute("aria-label", t("Clear {name}", { name: field.name }));
-          clear.onclick = () => void save(""); pill!.append(clear); nodes.push(clear);
+          clear.onclick = () => void save(""); pill.append(clear); nodes.push(clear);
         }
         const button = choiceButton(row, field, false); cell.append(button); nodes.push(button);
         return nodes;
@@ -4020,7 +4018,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
         const field = next.fields.find((item) => item.id === selection.fieldId && item.type === "attachment");
         if (!record || !field) return;
         const current = Array.isArray(record.values[field.id]) ? (record.values[field.id] as string[]).map(String) : [];
-        if (!current.includes(imported!.path)) current.push(imported!.path);
+        if (!current.includes(imported.path)) current.push(imported.path);
         record.values[field.id] = current;
       }, selection);
       const savedRow = table.records.find((item) => item.id === selection.rowId);
@@ -4401,9 +4399,9 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     layoutObserver?.disconnect(); proxyResizeObserver?.disconnect();
     clearMarkdownCells(); markdownLifecycle.unload();
     rowElementsById.clear();
-    if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
-    if (layoutResizeSuppressionFrame !== null) cancelAnimationFrame(layoutResizeSuppressionFrame);
-    if (proxyFrame !== null) cancelAnimationFrame(proxyFrame);
+    if (layoutFrame !== null) viewportWindow.cancelAnimationFrame(layoutFrame);
+    if (layoutResizeSuppressionFrame !== null) viewportWindow.cancelAnimationFrame(layoutResizeSuppressionFrame);
+    if (proxyFrame !== null) viewportWindow.cancelAnimationFrame(proxyFrame);
     viewportScrollElement?.removeEventListener("scroll", scheduleProxyUpdate);
     viewportWindow?.removeEventListener("scroll", scheduleProxyUpdate);
     viewportWindow?.removeEventListener("resize", scheduleProxyUpdate);

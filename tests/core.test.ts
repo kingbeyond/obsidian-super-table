@@ -20,7 +20,7 @@ import { fieldTypeLabel } from "../src/model";
 import { attachmentFileNameWithSuffix, normalizeSuperTableSettings, noteNamedAttachmentFolder, pastedImageFileName } from "../src/settings";
 import SuperTablePlugin from "../src/main";
 import { tableEditorExtension } from "../src/editor";
-import { editorInfoField, editorLivePreviewField, shownMenus, notices, markdownRenderCalls, MarkdownRenderer, Menu, Platform, TFile, setObsidianLanguage } from "./obsidian-stub";
+import { editorInfoField, editorLivePreviewField, shownMenus, notices, markdownRenderCalls, MarkdownRenderer, Menu, Platform, TFile, setObsidianLanguage, installObsidianDomHelpers, createdSettings } from "./obsidian-stub";
 
 const old = {
   columns: [
@@ -738,8 +738,13 @@ for (const name of ["window", "document", "Node", "HTMLElement", "Element", "HTM
 Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
 Object.defineProperty(dom.window, "matchMedia", { configurable: true, value: () => ({ matches: true }) });
 Object.defineProperty(dom.window.navigator, "clipboard", { configurable: true, value: { writeText: async () => {} } });
-Object.defineProperty(globalThis, "requestAnimationFrame", { configurable: true, value: (callback: () => void) => setTimeout(callback, 0) });
-Object.defineProperty(globalThis, "cancelAnimationFrame", { configurable: true, value: clearTimeout });
+const requestTestFrame = (callback: (timestamp: number) => void) => setTimeout(() => callback(dom.window.performance.now()), 0);
+const cancelTestFrame = (frame: number) => clearTimeout(frame);
+Object.defineProperty(dom.window, "requestAnimationFrame", { configurable: true, value: requestTestFrame });
+Object.defineProperty(dom.window, "cancelAnimationFrame", { configurable: true, value: cancelTestFrame });
+Object.defineProperty(globalThis, "requestAnimationFrame", { configurable: true, value: requestTestFrame });
+Object.defineProperty(globalThis, "cancelAnimationFrame", { configurable: true, value: cancelTestFrame });
+installObsidianDomHelpers(dom.window.document);
 const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
 test("[attachments][localization] plugin preferences keep their saved shape and stay separate from host settings", async () => {
   setObsidianLanguage("en");
@@ -749,10 +754,96 @@ test("[attachments][localization] plugin preferences keep their saved shape and 
   plugin.data = { attachmentImagePasteLocation: "note-folder" };
   await plugin.onload();
   assert.equal(plugin.superTableSettings.attachmentImagePasteLocation, "note-folder");
-  plugin.superTableSettings.attachmentImagePasteLocation = "obsidian";
-  await plugin.saveSettings();
+  const settingTab = plugin.settingTabs[0] as any;
+  assert.deepEqual(settingTab.getSettingDefinitions(), [{
+    name: "Attachment image paste location",
+    desc: "Choose where images pasted into attachment cells are saved. This does not affect device imports.",
+    control: {
+      type: "dropdown",
+      key: "attachmentImagePasteLocation",
+      defaultValue: "obsidian",
+      options: {
+        obsidian: "Use Obsidian attachment settings",
+        "note-folder": "Use sibling 附件/<note name>/ folder",
+      },
+    },
+  }]);
+  assert.equal(settingTab.getControlValue("attachmentImagePasteLocation"), "note-folder");
+  assert.equal(settingTab.getControlValue("unknown"), undefined);
+
+  await settingTab.setControlValue("attachmentImagePasteLocation", "note-folder");
+  assert.deepEqual(plugin.data, { attachmentImagePasteLocation: "note-folder" });
+  await settingTab.setControlValue("attachmentImagePasteLocation", "invalid-value");
+  assert.equal(settingTab.getControlValue("attachmentImagePasteLocation"), "obsidian");
   assert.deepEqual(plugin.data, { attachmentImagePasteLocation: "obsidian" });
+  await settingTab.setControlValue("unknown", "note-folder");
+  assert.deepEqual(plugin.data, { attachmentImagePasteLocation: "obsidian" }, "unknown controls do not write host or plugin data");
+
+  settingTab.display();
+  const legacySetting = createdSettings.at(-1)!;
+  assert.equal(legacySetting.dropdown!.value, "obsidian", "the legacy display path reads the same normalized preference");
+  assert.deepEqual([...legacySetting.dropdown!.options], [
+    ["obsidian", "Use Obsidian attachment settings"],
+    ["note-folder", "Use sibling 附件/<note name>/ folder"],
+  ]);
+  await legacySetting.dropdown!.change!("note-folder");
+  assert.deepEqual(plugin.data, { attachmentImagePasteLocation: "note-folder" });
+  assert.equal(settingTab.getControlValue("attachmentImagePasteLocation"), "note-folder");
   assert.equal(plugin.settings, hostSettings);
+});
+test("[layout] renderer schedules and cancels animation frames in the root's owning window", () => {
+  const secondary = new JSDOM("<!doctype html><html><body></body></html>", { url: "https://secondary.test", pretendToBeVisual: true });
+  const requestedByOwner: number[] = [];
+  const canceledByOwner: number[] = [];
+  const requestedGlobally: number[] = [];
+  const canceledGlobally: number[] = [];
+  let nextOwnerFrame = 0;
+  let nextGlobalFrame = 0;
+  const previousRequest = Object.getOwnPropertyDescriptor(globalThis, "requestAnimationFrame");
+  const previousCancel = Object.getOwnPropertyDescriptor(globalThis, "cancelAnimationFrame");
+  const previousActiveDocument = Object.getOwnPropertyDescriptor(globalThis, "activeDocument");
+  const previousActiveWindow = Object.getOwnPropertyDescriptor(globalThis, "activeWindow");
+  Object.defineProperty(secondary.window, "requestAnimationFrame", {
+    configurable: true,
+    value: (_callback: (timestamp: number) => void) => { const id = ++nextOwnerFrame; requestedByOwner.push(id); return id; },
+  });
+  Object.defineProperty(secondary.window, "cancelAnimationFrame", {
+    configurable: true,
+    value: (id: number) => { canceledByOwner.push(id); },
+  });
+  Object.defineProperty(globalThis, "requestAnimationFrame", {
+    configurable: true,
+    value: (_callback: (timestamp: number) => void) => { const id = ++nextGlobalFrame; requestedGlobally.push(id); return id; },
+  });
+  Object.defineProperty(globalThis, "cancelAnimationFrame", {
+    configurable: true,
+    value: (id: number) => { canceledGlobally.push(id); },
+  });
+  Object.defineProperty(globalThis, "activeDocument", { configurable: true, value: secondary.window.document });
+  Object.defineProperty(globalThis, "activeWindow", { configurable: true, value: secondary.window });
+  const root = secondary.window.document.createElement("div");
+  secondary.window.document.body.append(root);
+  let controller: ReturnType<typeof renderTable> | null = null;
+  try {
+    controller = renderTable({ app: {} } as any, JSON.stringify(fixture()), { root, sourcePath: "secondary.md" });
+    assert.ok(requestedByOwner.length > 0, "the renderer schedules layout work through the root document's window");
+    assert.deepEqual(requestedGlobally, [], "a different global window does not receive renderer frames");
+    controller.destroy();
+    controller = null;
+    assert.deepEqual(canceledByOwner, requestedByOwner, "destroy cancels each pending owner-window frame");
+    assert.deepEqual(canceledGlobally, [], "destroy uses the same owner window for frame cleanup");
+  } finally {
+    controller?.destroy();
+    if (previousRequest) Object.defineProperty(globalThis, "requestAnimationFrame", previousRequest);
+    else delete (globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame;
+    if (previousCancel) Object.defineProperty(globalThis, "cancelAnimationFrame", previousCancel);
+    else delete (globalThis as { cancelAnimationFrame?: unknown }).cancelAnimationFrame;
+    if (previousActiveDocument) Object.defineProperty(globalThis, "activeDocument", previousActiveDocument);
+    else delete (globalThis as { activeDocument?: unknown }).activeDocument;
+    if (previousActiveWindow) Object.defineProperty(globalThis, "activeWindow", previousActiveWindow);
+    else delete (globalThis as { activeWindow?: unknown }).activeWindow;
+    secondary.window.close();
+  }
 });
 async function waitForCondition(condition: () => boolean, description: string, timeoutMs = 1500): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -918,6 +1009,39 @@ test("[markdown] preview reuse excludes component-dependent content and bounds r
   rendered.innerHTML = `<p>${"a".repeat(16_385)}</p>`;
   cache.remember("**large**", rendered);
   assert.equal(cache.restore("**large**", content), false, "large rendered output is not retained");
+});
+test("[markdown] cached previews are adopted into the document that owns the table", () => {
+  const secondary = new JSDOM("<!doctype html><html><body></body></html>", { url: "https://preview.test" });
+  const otherDocument = secondary.window.document;
+  const nativeAdoptNode = otherDocument.adoptNode.bind(otherDocument);
+  let adoptionCount = 0;
+  let sourceDocument: Document | null = null;
+  let adoptedDocument: Document | null = null;
+  Object.defineProperty(otherDocument, "adoptNode", {
+    configurable: true,
+    value: (node: Node) => {
+      adoptionCount++;
+      sourceDocument = node.ownerDocument;
+      const adopted = nativeAdoptNode(node);
+      adoptedDocument = adopted.ownerDocument;
+      return adopted;
+    },
+  });
+  const rendered = document.createElement("div");
+  rendered.innerHTML = "<p><strong>Rendered in another document</strong></p>";
+  const content = otherDocument.createElement("div");
+  const cache = markdownPreviewCache({}, otherDocument, "other-document.md");
+  try {
+    cache.remember("**Rendered in another document**", rendered);
+    assert.equal(adoptionCount, 1, "the preview fragment is adopted by the table's document");
+    assert.equal(sourceDocument, document, "the global Obsidian fragment helper starts in the test's primary document");
+    assert.equal(adoptedDocument, otherDocument);
+    assert.equal(cache.restore("**Rendered in another document**", content), true);
+    assert.equal(content.querySelector("strong")?.textContent, "Rendered in another document");
+    assert.ok([...content.querySelectorAll("*")].every((element) => element.ownerDocument === otherDocument));
+  } finally {
+    secondary.window.close();
+  }
 });
 test("[markdown] Markdown previews preserve source line breaks after editing and rendering", async () => {
   const originalObserver = Object.getOwnPropertyDescriptor(globalThis, "IntersectionObserver");

@@ -34,7 +34,7 @@ export function markdownPreviewCache(owner: object, doc: Document, sourcePath: s
         || element.classList.contains("internal-link")
         || element.tagName === "A" && !/^https?:\/\//i.test(element.getAttribute("href") ?? ""))) return;
       const key = JSON.stringify([sourcePath, source]);
-      const preview = doc.createDocumentFragment();
+      const preview = doc.adoptNode(createFragment());
       rendered.childNodes.forEach((child) => preview.append(child.cloneNode(true)));
       cache.delete(key); cache.set(key, preview);
       if (cache.size > MAX_PREVIEWS) cache.delete(cache.keys().next().value!);

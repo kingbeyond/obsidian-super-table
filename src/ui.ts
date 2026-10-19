@@ -3,7 +3,7 @@ import { App, Menu, MenuItem, Modal, setIcon } from "obsidian";
 import { FieldType } from "./model";
 
 export function node<K extends keyof HTMLElementTagNameMap>(tag: K, className = "", text?: string): HTMLElementTagNameMap[K] {
-  const element = document.createElement(tag);
+  const element = createEl(tag);
   element.className = className;
   if (text !== undefined) element.textContent = text;
   return element;
@@ -30,7 +30,7 @@ export const fieldIcon: Record<FieldType, string> = {
 };
 
 export function configMenuTitle(label: string): DocumentFragment {
-  const title = document.createDocumentFragment();
+  const title = createFragment();
   // Scope the fixed check column without accessing Menu's private DOM or styling other menus.
   title.append(node("span", "tb-config-menu-label", label));
   return title;

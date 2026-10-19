@@ -37,7 +37,7 @@ const IMAGE_EXTENSIONS: Record<string, string> = {
 export function pastedImageFileName(name: string, mimeType: string, timestamp = Date.now()): string {
   const mime = mimeType.toLowerCase().split(";")[0].trim();
   const extension = IMAGE_EXTENSIONS[mime];
-  const basename = name.replace(/\\/g, "/").split("/").at(-1) ?? "";
+  const basename = name.replace(/\\/g, "/").split("/").pop() ?? "";
   let safeName = basename.trim().replace(/[\u0000-\u001f<>:"|?*]/g, "_");
   if (!safeName || safeName === "." || safeName === "..") {
     return `pasted-image-${timestamp}${extension ? `.${extension}` : ""}`;

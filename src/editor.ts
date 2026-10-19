@@ -14,7 +14,7 @@ class TableWidget extends WidgetType {
     readonly locateEmpty: (view: EditorView, id: string) => FencedBlock | undefined, readonly emptyTable?: TableDocument) { super(); }
   eq(other: TableWidget): boolean { return this.body === other.body && this.path === other.path && this.id === other.id; }
   toDOM(view: EditorView): HTMLElement {
-    const root = view.dom.ownerDocument.createElement("div");
+    const root = view.dom.ownerDocument.adoptNode(createDiv());
     root.className = "tablebase-root tb-live-preview";
     this.controller = renderTable(this.plugin, this.body, {
       sourcePath: this.path,
@@ -83,7 +83,8 @@ export function tableEditorExtension(plugin: Plugin): Extension {
   const locateEmpty = (view: EditorView, id: string): FencedBlock | undefined => {
     let startLine: number | undefined;
     view.state.field(decorations).between(0, view.state.doc.length, (from, _to, decoration) => {
-      if (decoration.spec.widget.id === id) startLine = view.state.doc.lineAt(from).number - 1;
+      const widget = (decoration.spec as { widget?: unknown }).widget;
+      if (widget instanceof TableWidget && widget.id === id) startLine = view.state.doc.lineAt(from).number - 1;
     });
     return scanFencedBlocks(view.state.doc.toString()).find((block) => block.language === TABLE_CODE_BLOCK_LANGUAGE
       && block.startLine === startLine && !block.body.trim());
@@ -93,7 +94,7 @@ export function tableEditorExtension(plugin: Plugin): Extension {
     const path = pathOf(state); if (!path) return Decoration.none;
     let retainedWidget: TableWidget | undefined;
     if (preserve?.path === path) previous.between(0, state.doc.length, (_from, _to, decoration) => {
-      const widget = decoration.spec.widget as TableWidget;
+      const widget = (decoration.spec as { widget?: unknown }).widget;
       if (widget instanceof TableWidget && widget.path === preserve.path && widget.id === preserve.tableId) retainedWidget = widget;
     });
     let retainedWidgetUsed = false;
@@ -104,8 +105,8 @@ export function tableEditorExtension(plugin: Plugin): Extension {
         let emptyTable: TableDocument | undefined;
         if (!block.body.trim()) {
           previous.between(from, to, (oldFrom, oldTo, decoration) => {
-            const widget = decoration.spec.widget as TableWidget;
-            if (oldFrom === from && oldTo === to && widget.path === path && !widget.body.trim()) emptyTable = widget.emptyTable;
+            const widget = (decoration.spec as { widget?: unknown }).widget;
+            if (widget instanceof TableWidget && oldFrom === from && oldTo === to && widget.path === path && !widget.body.trim()) emptyTable = widget.emptyTable;
           });
           emptyTable ??= createDefaultTable();
         }

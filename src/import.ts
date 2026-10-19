@@ -23,12 +23,13 @@ function mapOldType(type: unknown): FieldType {
 
 function makeOptions(source: unknown, type: FieldType): SelectOption[] {
   if (!["select", "multiselect", "status"].includes(type)) return [];
-  const entries = Array.isArray(source) ? source : [];
+  const entries: unknown[] = Array.isArray(source) ? source : [];
   const options: SelectOption[] = [];
   entries.forEach((item, index) => {
-    const label = typeof item === "string" ? item : item && typeof item.label === "string" ? item.label : "";
+    const option = item && typeof item === "object" ? item as Record<string, unknown> : {};
+    const label = typeof item === "string" ? item : typeof option.label === "string" ? option.label : "";
     if (!label || options.some((option) => option.label === label)) return;
-    const colorValue = item && typeof item.color === "string" ? item.color.toLowerCase() : OPTION_COLORS[index % OPTION_COLORS.length];
+    const colorValue = typeof option.color === "string" ? option.color.toLowerCase() : OPTION_COLORS[index % OPTION_COLORS.length];
     options.push({ id: makeId("option"), label, color: OPTION_COLORS.includes(colorValue) ? colorValue : OPTION_COLORS[index % OPTION_COLORS.length] });
   });
   return options;
@@ -198,13 +199,13 @@ export function convertMarkdownTable(source: string): ConversionResult {
     }
     return [row];
   });
-  const fields = headings.map((name, col) => {
+  const fields = headings.map<Field>((name, col) => {
     const values = cells.map((row) => row[col] || "");
     const type = inferMarkdownType(values);
     return {
       id: makeId("field"), name: name || t("Field {number}", { number: col + 1 }), type, width: 160,
       dateFormat: type === "date" && values.filter(Boolean).some((value) => /[T ]\d{2}:\d{2}/.test(value)) ? "iso-datetime" : undefined,
-    } as Field;
+    };
   });
   const records = cells.map((row) => {
     const values: Record<string, CellValue> = {};

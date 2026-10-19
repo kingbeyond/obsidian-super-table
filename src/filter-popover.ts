@@ -24,7 +24,7 @@ interface Draft {
 }
 const sessions = new Map<string, FilterSession>();
 const popovers = new Map<string, FilterPopover>();
-const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value));
+const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const fingerprint = (rule: FilterCondition) => JSON.stringify(rule);
 const operatorLabels: Record<FilterOperator, MessageKey> = {
   eq: "Equals", neq: "Does not equal", contains: "Contains", notContains: "Does not contain",
@@ -42,7 +42,7 @@ function nameControl(element: HTMLElement, text: string): void {
 }
 
 export function attachFilterSession(key: string, session: FilterSession): () => void {
-  const document = session.trigger()?.ownerDocument ?? globalThis.document;
+  const document = session.trigger()?.ownerDocument ?? activeDocument;
   sessions.set(key, session);
   popovers.get(key)?.refresh();
   return () => {
