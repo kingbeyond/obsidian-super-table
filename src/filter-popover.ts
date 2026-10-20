@@ -5,7 +5,7 @@ import { makeId } from "./model";
 import type { Field } from "./model";
 import { filterDateKind, filterNeedsValue, filterOperators, validFilterCondition } from "./filters";
 import type { FilterCondition, FilterGroup, FilterOperator } from "./filters";
-import { configMenuTitle, control, fieldIcon, icon, node, showMenu } from "./ui";
+import { configMenuItem, control, fieldIcon, icon, node, showMenu } from "./ui";
 
 export interface FilterSession {
   trigger(): HTMLButtonElement | null;
@@ -423,8 +423,7 @@ class FilterPopover {
     this.closeSelectMenu(); this.closePicker();
     const menu = new Menu().setUseNativeMenu(false);
     for (const option of options) menu.addItem((item) => {
-      item.setTitle(configMenuTitle(option.label)).setChecked(option.value === trigger.value).onClick(() => choose(option.value));
-      if (option.icon) item.setIcon(option.icon);
+      configMenuItem(item, option.label, option.icon).setChecked(option.value === trigger.value).onClick(() => choose(option.value));
     });
     this.selectMenu = { menu, draft, trigger }; trigger.setAttribute("aria-expanded", "true");
     showMenu(menu, trigger, undefined, () => {

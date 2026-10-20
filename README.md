@@ -38,7 +38,7 @@ Before AI edits note files, provide the [Super Table editing skill](SKILL.md) so
 
 ## Installation
 
-Version 1.0.1 and later require Obsidian 1.8.7 or newer.
+Version 1.0.4 and later require Obsidian 1.13.0 or newer. Versions 1.0.1–1.0.3 retain their Obsidian 1.8.7 minimum.
 
 Open the [Obsidian Community listing](https://community.obsidian.md/plugins/super-table), select **Add to Obsidian**, then follow the prompts in Obsidian to install and enable Super Table.
 

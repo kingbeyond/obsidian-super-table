@@ -29,11 +29,12 @@ export const fieldIcon: Record<FieldType, string> = {
   checkbox: "check-square", select: "chevron-down-circle", multiselect: "tags", attachment: "paperclip", status: "circle-dot",
 };
 
-export function configMenuTitle(label: string): DocumentFragment {
+export function configMenuItem(item: MenuItem, label: string, glyph?: string): MenuItem {
   const title = createFragment();
-  // Scope the fixed check column without accessing Menu's private DOM or styling other menus.
   title.append(node("span", "tb-config-menu-label", label));
-  return title;
+  // Pass content icons here and keep each menu uniform: sections affect host ordering and separators.
+  if (glyph) item.setIcon(glyph);
+  return item.setSection(glyph ? "super-table-config-icon" : "super-table-config").setTitle(title);
 }
 
 export function menuAction(menu: Menu, label: string, glyph: string, action: () => unknown, disabled = false, warning = false): void {

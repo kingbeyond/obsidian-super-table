@@ -44,7 +44,7 @@ for (const result of results) {
       const call = node.expression.getText(source);
       if (/\.vault\.(getFiles|getMarkdownFiles)$/.test(call)) record(node, "behavior/vault-enumeration", "Vault file enumeration is used for the attachment picker.");
       if (/\.clipboard\.(read|readText|write|writeText)$/.test(call)) record(node, "behavior/clipboard", "Clipboard access supports user copy/paste operations.");
-      if (/\.(localStorage|sessionStorage)\.(getItem|setItem|removeItem)$/.test(call)) record(node, "behavior/local-storage", "Browser storage supports the host language fallback and device-local view memory.");
+      if (/\.(localStorage|sessionStorage)\.(getItem|setItem|removeItem)$/.test(call)) record(node, "behavior/local-storage", "Browser storage is used; review its scope and persistence.");
     }
     ts.forEachChild(node, visit);
   }

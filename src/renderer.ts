@@ -12,7 +12,7 @@ import { applyReadingViewTableHistory, clearRecentReadingViewTableWrite, hasRece
 import { convertMarkdownTable, convertSmartTable } from "./import";
 import { convertSuperTableToMarkdown, createMarkdownExportFile } from "./markdown-export";
 import { captureRows, clipboardValues, linkEditorFields, parseWebLink, RowClipboard, moveRelative, serializeWebLink, valueFromLabel } from "./interaction";
-import { node as el, configMenuTitle, control, icon, fieldIcon, menuAction, submenu, showMenu, promptForm, confirmDialog, FormField, PromptFormOptions } from "./ui";
+import { node as el, configMenuItem, control, icon, fieldIcon, menuAction, submenu, showMenu, promptForm, confirmDialog, FormField, PromptFormOptions } from "./ui";
 import { findMarkdownTaskMarkers, needsMarkdownRendering, safeMarkdownEmbeds, setMarkdownTaskState } from "./markdown";
 import { markdownPreviewCache } from "./markdown-preview";
 import { rememberedView, rememberView } from "./view-state";
@@ -86,14 +86,9 @@ async function createUniqueAttachmentFile(app: App, folderPath: string, fileName
   throw new Error(t("Could not find an unused attachment filename."));
 }
 
-async function createObsidianAttachmentFile(app: App, sourcePath: string, fileName: string, data: ArrayBuffer): Promise<TFile | null> {
-  const fileManager = (app as App & { fileManager?: { getAvailablePathForAttachment?: (name: string, path?: string) => Promise<string> } }).fileManager;
-  const getAvailablePath = typeof fileManager?.getAvailablePathForAttachment === "function"
-    ? fileManager.getAvailablePathForAttachment.bind(fileManager)
-    : null;
-  if (!getAvailablePath) return null;
+async function createObsidianAttachmentFile(app: App, sourcePath: string, fileName: string, data: ArrayBuffer): Promise<TFile> {
   for (let attempt = 0; attempt < 100; attempt++) {
-    const path = await getAvailablePath(fileName, sourcePath);
+    const path = await app.fileManager.getAvailablePathForAttachment(fileName, sourcePath);
     try {
       return await app.vault.createBinary(path, data);
     } catch (error) {
@@ -211,11 +206,13 @@ async function writeClipboard(text: string): Promise<void> {
   const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   area.value = text;
   document.body.append(area);
-  area.select();
-  const copied = document.execCommand("copy");
-  area.remove();
-  if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
-  if (!copied) throw new Error(t("Clipboard access is unavailable."));
+  try {
+    area.select();
+    if (!document.execCommand("copy")) throw new Error(t("Clipboard access is unavailable."));
+  } finally {
+    area.remove();
+    if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+  }
 }
 
 async function downloadCsv(fields: Field[], rows: RecordRow[], fileName: string): Promise<void> {
@@ -254,6 +251,7 @@ type ExportScope = "current" | "all";
 
 export function createExportFileName(viewName: string, scope: ExportScope, extension: "csv" | "md"): string {
   const base = scope === "all" ? `${viewName} - ${t("All data")}` : viewName;
+  // eslint-disable-next-line no-control-regex -- Intentionally replace C0 controls in exported filenames.
   const safeBase = base.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "-")
     .replace(/\s+/g, " ").trim().replace(/[. ]+$/g, "");
   return `${safeBase || t("Super Table export")}.${extension}`;
@@ -761,10 +759,6 @@ function preserveNoteViewportScroll(
 }
 
 function pickAttachments(app: App, sourcePath: string): Promise<string[] | null> {
-  const fileManager = (app as App & { fileManager?: { getAvailablePathForAttachment?: (name: string, path?: string) => Promise<string> } }).fileManager;
-  const getAvailablePath = typeof fileManager?.getAvailablePathForAttachment === "function"
-    ? fileManager.getAvailablePathForAttachment.bind(fileManager)
-    : null;
   return new Promise((resolve) => {
     class AttachmentModal extends Modal {
       selected = new Set<string>();
@@ -788,8 +782,7 @@ function pickAttachments(app: App, sourcePath: string): Promise<string[] | null>
         this.importInput.onchange = () => { void this.importFiles([...this.importInput.files ?? []]); };
         const actions = el("div", "tb-dialog-actions");
         const importButton = control(t("Import from device"), "file-up", "tb-attachment-picker-import");
-        importButton.disabled = !getAvailablePath;
-        if (getAvailablePath) importButton.onclick = () => this.importInput.click();
+        importButton.onclick = () => this.importInput.click();
         const cancel = control(t("Cancel")); cancel.onclick = () => this.close();
         const add = control(t("Add selected"), "paperclip"); add.classList.add("mod-cta");
         add.onclick = () => { this.result = [...this.selected]; this.close(); };
@@ -801,7 +794,6 @@ function pickAttachments(app: App, sourcePath: string): Promise<string[] | null>
         submitActions.append(cancel, add);
         actions.append(importButton, submitActions);
         this.contentEl.append(searchLabel, this.search, this.status, this.list, this.importInput);
-        if (!getAvailablePath) this.contentEl.append(el("p", "tb-attachment-picker-unavailable", t("Device import requires Obsidian 1.5.7 or newer.")));
         this.contentEl.append(actions);
         this.drawList(); this.search.focus();
       }
@@ -841,10 +833,9 @@ function pickAttachments(app: App, sourcePath: string): Promise<string[] | null>
       }
 
       async importFiles(files: File[]): Promise<void> {
-        if (!getAvailablePath) return;
         for (const external of files) {
           try {
-            const path = await getAvailablePath(external.name, sourcePath);
+            const path = await app.fileManager.getAvailablePathForAttachment(external.name, sourcePath);
             const imported = await app.vault.createBinary(path, await external.arrayBuffer());
             this.selected.add(imported.path);
           } catch (error) {
@@ -1905,9 +1896,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
       const nextView = next.views.find((item) => item.id === viewId)!;
       nextView.group = { fieldId, direction: selectedDirection };
     });
-    table.fields.forEach((field) => groupMenu.addItem((item) => item
-      .setTitle(configMenuTitle(field.name || t("Untitled")))
-      .setIcon(fieldIcon[field.type])
+    table.fields.forEach((field) => groupMenu.addItem((item) => configMenuItem(item, field.name || t("Untitled"), fieldIcon[field.type])
       .setChecked(selectedField?.id === field.id)
       .onClick(() => void apply(field.id))));
     select.onclick = () => {
@@ -2203,7 +2192,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
         const label = t(align === "left" ? "Left" : align === "center" ? "Center" : "Right");
         const applyAlignment = () => commit((next) => { next.fields.find((item) => item.id === field.id)!.align = align; });
         if (!Platform.isMobile) {
-          child.addItem((item) => item.setTitle(configMenuTitle(label)).setIcon(`align-${align}`).setChecked(field.align === align).onClick(applyAlignment));
+          child.addItem((item) => configMenuItem(item, label, `align-${align}`).setChecked(field.align === align).onClick(applyAlignment));
         } else {
           menuAction(child, label, field.align === align ? "check" : `align-${align}`, applyAlignment);
         }
@@ -3168,10 +3157,9 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
       const selected = current === option.id;
       const title = anchor.ownerDocument.adoptNode(createFragment());
       const label = title.createSpan();
-      if (!selected) label.className = "tb-choice-option-unselected";
       label.textContent = option.label;
       title.append(label);
-      menu.addItem((item) => item.setTitle(title).setIcon("check").onClick(() => save(option.id)));
+      menu.addItem((item) => item.setSection("super-table-choices").setTitle(title).setIcon(selected ? "check" : null).onClick(() => save(option.id)));
     });
     menu.addSeparator();
     menuAction(menu, t("Clear"), "x", () => save(""));
@@ -3366,7 +3354,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
         }
         const nextValue = cancelled ? valueText : editor.value;
         cancelled = false;
-        preview.hidden = false; editor.remove(); inputLabel?.remove(); inputLabel = null; wrap.classList.remove("is-editing");
+        preview.hidden = false; editor.remove(); inputLabel?.remove(); inputLabel = null; wrap.classList.remove("is-editing"); cell.classList.remove("is-cell-editing");
         if (saveChanges && nextValue !== valueText) void save(nextValue);
       };
       const beginEditing = () => {
@@ -3399,7 +3387,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
         input.addEventListener("keyup", editorKeyHandler, true);
         disposeEditing = () => finishEditing(false);
         textEditorDisposers.add(disposeEditing);
-        preview.hidden = true; wrap.classList.add("is-editing"); wrap.append(input, inputLabel);
+        preview.hidden = true; wrap.classList.add("is-editing"); cell.classList.add("is-cell-editing"); wrap.append(input, inputLabel);
         const naturalHeight = input.scrollHeight;
         const editorHeight = Math.max(entryHeight, naturalHeight);
         input.style.height = `${editorHeight}px`;
@@ -4001,17 +3989,13 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
       const settings = (plugin as Plugin & { superTableSettings?: SuperTableSettings }).superTableSettings;
       const location = settings?.attachmentImagePasteLocation ?? "obsidian";
       const data = await image.arrayBuffer();
-      let imported: TFile | null;
+      let imported: TFile;
       if (location === "note-folder") {
         const folder = noteNamedAttachmentFolder(context.sourcePath);
         await ensureAttachmentFolder(plugin.app, folder);
         imported = await createUniqueAttachmentFile(plugin.app, folder, fileName, data);
       } else {
         imported = await createObsidianAttachmentFile(plugin.app, context.sourcePath, fileName, data);
-        if (!imported) {
-          new Notice(t("Clipboard image paste using Obsidian settings requires Obsidian 1.5.7 or newer."));
-          return;
-        }
       }
       const saved = await commit((next) => {
         const record = next.records.find((item) => item.id === selection.rowId);

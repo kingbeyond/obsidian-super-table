@@ -38,6 +38,7 @@ export function pastedImageFileName(name: string, mimeType: string, timestamp = 
   const mime = mimeType.toLowerCase().split(";")[0].trim();
   const extension = IMAGE_EXTENSIONS[mime];
   const basename = name.replace(/\\/g, "/").split("/").pop() ?? "";
+  // eslint-disable-next-line no-control-regex -- Intentionally replace C0 controls in pasted-image filenames.
   let safeName = basename.trim().replace(/[\u0000-\u001f<>:"|?*]/g, "_");
   if (!safeName || safeName === "." || safeName === "..") {
     return `pasted-image-${timestamp}${extension ? `.${extension}` : ""}`;

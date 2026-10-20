@@ -8,8 +8,6 @@ export default defineConfig([
     rules: {
       // The directory also skips this noisy rule; preserve existing import conversions.
       "@typescript-eslint/no-base-to-string": "off",
-      // These filename sanitizers intentionally reject control characters.
-      "no-control-regex": "warn",
     },
     languageOptions: {
       parserOptions: {

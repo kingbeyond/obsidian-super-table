@@ -120,26 +120,6 @@ export class Plugin {
 export class PluginSettingTab {
   containerEl = document.createElement("div");
   constructor(public app: unknown, public plugin: unknown) {}
-  display() {}
-}
-class TestDropdown {
-  options = new Map<string, string>();
-  value = "";
-  change?: (value: string) => unknown;
-  addOption(value: string, label: string) { this.options.set(value, label); return this; }
-  setValue(value: string) { this.value = value; return this; }
-  onChange(callback: (value: string) => unknown) { this.change = callback; return this; }
-}
-export const createdSettings: Setting[] = [];
-export class Setting {
-  readonly settingEl = document.createElement("div");
-  name = "";
-  description = "";
-  dropdown?: TestDropdown;
-  constructor(container: HTMLElement) { container.append(this.settingEl); createdSettings.push(this); }
-  setName(name: string) { this.name = name; return this; }
-  setDesc(description: string) { this.description = description; return this; }
-  addDropdown(callback: (dropdown: TestDropdown) => unknown) { this.dropdown = new TestDropdown(); callback(this.dropdown); return this; }
 }
 export class MarkdownRenderChild { constructor(public containerEl: HTMLElement) {} }
 export class Component {
@@ -160,19 +140,23 @@ export class MarkdownRenderer {
     element.textContent = markdown;
   }
 }
-export let getLanguage: (() => string) | undefined = () => "en";
-export function setObsidianLanguage(language: string, legacy = false): void {
-  getLanguage = legacy ? undefined : () => language;
+export let getLanguage: () => string = () => "en";
+export function setObsidianLanguage(language: string): void {
+  getLanguage = () => language;
+}
+export function setObsidianLanguageFailure(error = new Error("language API failed")): void {
+  getLanguage = () => { throw error; };
 }
 export class MenuItem {
-  title = ""; icon = ""; disabled = false; checked: boolean | null = null; child?: Menu; action?: (event: any) => unknown;
+  title = ""; icon = ""; disabled = false; checked: boolean | null = null; section = ""; child?: Menu; action?: (event: any) => unknown;
   titleFragment?: DocumentFragment;
   setTitle(value: string | DocumentFragment) {
     this.title = typeof value === "string" ? value : value.textContent ?? "";
     this.titleFragment = typeof value === "string" ? undefined : value.cloneNode(true) as DocumentFragment;
     return this;
   }
-  setIcon(value: string) { this.icon = value; return this; }
+  setSection(value: string) { this.section = value; return this; }
+  setIcon(value: string | null) { this.icon = value ?? ""; return this; }
   setChecked(value: boolean | null) { this.checked = value; return this; }
   setDisabled(value: boolean) { this.disabled = value; return this; }
   setWarning(_: boolean) { return this; }

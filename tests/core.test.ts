@@ -20,7 +20,8 @@ import { fieldTypeLabel } from "../src/model";
 import { attachmentFileNameWithSuffix, normalizeSuperTableSettings, noteNamedAttachmentFolder, pastedImageFileName } from "../src/settings";
 import SuperTablePlugin from "../src/main";
 import { tableEditorExtension } from "../src/editor";
-import { editorInfoField, editorLivePreviewField, shownMenus, notices, markdownRenderCalls, MarkdownRenderer, Menu, Platform, TFile, setObsidianLanguage, installObsidianDomHelpers, createdSettings } from "./obsidian-stub";
+import { promptForm } from "../src/ui";
+import { editorInfoField, editorLivePreviewField, shownMenus, notices, markdownRenderCalls, MarkdownRenderer, Menu, Platform, TFile, setObsidianLanguage, setObsidianLanguageFailure, installObsidianDomHelpers } from "./obsidian-stub";
 
 const old = {
   columns: [
@@ -779,16 +780,6 @@ test("[attachments][localization] plugin preferences keep their saved shape and 
   await settingTab.setControlValue("unknown", "note-folder");
   assert.deepEqual(plugin.data, { attachmentImagePasteLocation: "obsidian" }, "unknown controls do not write host or plugin data");
 
-  settingTab.display();
-  const legacySetting = createdSettings.at(-1)!;
-  assert.equal(legacySetting.dropdown!.value, "obsidian", "the legacy display path reads the same normalized preference");
-  assert.deepEqual([...legacySetting.dropdown!.options], [
-    ["obsidian", "Use Obsidian attachment settings"],
-    ["note-folder", "Use sibling 附件/<note name>/ folder"],
-  ]);
-  await legacySetting.dropdown!.change!("note-folder");
-  assert.deepEqual(plugin.data, { attachmentImagePasteLocation: "note-folder" });
-  assert.equal(settingTab.getControlValue("attachmentImagePasteLocation"), "note-folder");
   assert.equal(plugin.settings, hostSettings);
 });
 test("[layout] renderer schedules and cancels animation frames in the root's owning window", () => {
@@ -1057,7 +1048,10 @@ test("[markdown] Markdown previews preserve source line breaks after editing and
     const rowId = ui.table.records[0].id; const fieldId = ui.table.fields[0].id;
     const cell = ui.root.querySelector<HTMLTableCellElement>(`td[data-field-id="${fieldId}"]`)!;
     const value = "first line\n\n\n";
-    const input = openMarkdownEditor(cell); input.value = value; input.blur();
+    const input = openMarkdownEditor(cell);
+    assert.ok(cell.classList.contains("is-cell-editing"), "the active text cell should expose its editing state");
+    input.value = value; input.blur();
+    assert.equal(cell.classList.contains("is-cell-editing"), false, "saving should clear the editing state before refresh");
     await waitForCondition(() => !cell.isConnected, "multiline edit save and refresh");
     const preview = ui.root.querySelector<HTMLElement>(`tr[data-row-id="${rowId}"] td[data-field-id="${fieldId}"] .tb-markdown-content`)!;
     await waitForCondition(() => !preview.classList.contains("is-markdown-pending"), "multiline Markdown preview rendering");
@@ -1074,6 +1068,7 @@ test("[markdown] Markdown previews preserve source line breaks after editing and
     const reopenedInput = openMarkdownEditor(reopenedCell);
     assert.equal(reopenedInput.style.height, "88px", "reopening should use the source content height when the row is shorter");
     reopenedInput.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    assert.equal(reopenedCell.classList.contains("is-cell-editing"), false, "cancelling should clear the editing state");
   } finally {
     ui.cleanup(); style.remove();
     if (originalObserver) Object.defineProperty(globalThis, "IntersectionObserver", originalObserver);
@@ -1480,6 +1475,7 @@ function openMarkdownEditor(cell: HTMLTableCellElement): HTMLTextAreaElement {
   pointerClick(cell);
   const input = cell.querySelector<HTMLTextAreaElement>(".tb-markdown-editor");
   assert.ok(input, "the next click should open the Markdown source editor");
+  assert.ok(cell.classList.contains("is-cell-editing"), "the text editor should mark its cell as editing");
   return input;
 }
 function dragDataTransfer() {
@@ -2168,6 +2164,46 @@ test("[import-export] Markdown copy actions use the view projection or full stor
     setLanguage(previousLocale);
   }
 });
+test("[import-export][interaction] clipboard fallback cleans up and restores focus after success, refusal, or an exception", async () => {
+  const originalWriteText = navigator.clipboard.writeText;
+  const originalExecCommand = Object.getOwnPropertyDescriptor(document, "execCommand");
+  const previousLocale = getLocale(); setLanguage("en");
+  navigator.clipboard.writeText = async () => { throw new Error("clipboard blocked"); };
+  try {
+    for (const outcome of ["success", "refused", "throws"] as const) {
+      const ui = mount(fixture(), true);
+      const previous = document.createElement("input"); document.body.append(previous);
+      try {
+        click(byLabel(ui.root, "Export"));
+        const menu = shownMenus.at(-1)!.items.find((item) => item.title === t("Export Markdown"))!.child!;
+        const copy = menu.items.find((item) => item.title === t("Copy current view"))!;
+        previous.focus();
+        let calls = 0;
+        Object.defineProperty(document, "execCommand", { configurable: true, value: (command: string) => {
+          calls++; assert.equal(command, "copy");
+          const helper = document.querySelector<HTMLTextAreaElement>(".tb-clipboard-helper");
+          assert.ok(helper); assert.match(helper.value, /^\|/);
+          helper.focus();
+          if (outcome === "throws") throw new Error("copy command failed");
+          return outcome === "success";
+        } });
+        await copy.action!({});
+        assert.equal(calls, 1, "a denied async clipboard still tries the native copy fallback");
+        assert.equal(document.querySelector(".tb-clipboard-helper"), null, outcome);
+        assert.equal(document.activeElement, previous, outcome);
+        assert.equal(ui.saved(), null, "copying must not write note data");
+        assert.equal(notices.at(-1), outcome === "success" ? t("Markdown table copied to clipboard.") : t("Could not copy Markdown table: {message}", {
+          message: outcome === "throws" ? "copy command failed" : t("Clipboard access is unavailable."),
+        }));
+      } finally { previous.remove(); ui.cleanup(); }
+    }
+  } finally {
+    navigator.clipboard.writeText = originalWriteText;
+    if (originalExecCommand) Object.defineProperty(document, "execCommand", originalExecCommand);
+    else delete (document as Document & { execCommand?: (command: string) => boolean }).execCommand;
+    setLanguage(previousLocale);
+  }
+});
 test("[import-export][localization] export filenames identify the selected scope and sanitize view names", () => {
   for (const language of ["en", "zh-CN"]) {
     setLanguage(language);
@@ -2176,6 +2212,12 @@ test("[import-export][localization] export filenames identify the selected scope
     assert.equal(createExportFileName("Bad/Name", "current", "csv"), "Bad-Name.csv");
   }
   setLanguage("en");
+  for (let code = 0; code <= 0x1f; code++) {
+    const control = String.fromCharCode(code);
+    assert.equal(createExportFileName(`A${control}B`, "current", "csv"), "A-B.csv", `U+${code.toString(16).padStart(4, "0")}`);
+  }
+  assert.equal(createExportFileName(`A${String.fromCharCode(0, 1, 31)}B`, "current", "csv"), "A-B.csv");
+  assert.equal(createExportFileName(" 中文 😀 A B ", "current", "csv"), "中文 😀 A B.csv");
 });
 test("[import-export][localization] Markdown conversion defaults to insertion and warns only when replacement is selected", async () => {
   for (const language of ["en", "zh-CN"]) {
@@ -2243,7 +2285,7 @@ test("[import-export][storage][localization] Markdown conversion command inserts
       addCommand: (command: any) => commands.push(command),
     });
     await plugin.onload();
-    return commands.find((command) => command.id === "convert-super-table-to-markdown");
+    return commands.find((command) => command.id === "convert-to-markdown");
   };
 
   const command = await loadCommand();
@@ -2528,6 +2570,7 @@ test("[attachments] attachment keyboard entry opens the panel, picker cancel pre
   table.records[0].values[field.id] = ["Assets/photo.png"];
   const file = new TFile("Assets/photo.png"); let saved: TableDocument | null = null; let deleteCalls = 0;
   const plugin = { app: {
+    fileManager: { getAvailablePathForAttachment: async (name: string) => `Attachments/${name}` },
     vault: {
       getAbstractFileByPath: (path: string) => path === file.path ? file : null,
       getFiles: () => [file], getResourcePath: () => "obsidian://resource/Assets/photo.png",
@@ -2548,8 +2591,8 @@ test("[attachments] attachment keyboard entry opens the panel, picker cancel pre
     click(panel.querySelector(".tb-attachment-add")!);
     const picker = document.querySelector<HTMLElement>(".tb-attachment-picker"); assert.ok(picker);
     const importButton = byEditorName(picker, "Import from device") as HTMLButtonElement;
-    assert.equal(importButton.disabled, true, "older Obsidian APIs must disable device import clearly");
-    assert.match(picker.querySelector(".tb-attachment-picker-unavailable")?.textContent ?? "", /1\.5\.7/);
+    assert.equal(importButton.disabled, false, "the supported host path API enables device import");
+    assert.equal(picker.querySelector(".tb-attachment-picker-unavailable"), null);
     byLabel(picker, file.path).focus();
     const fileList = picker.querySelector<HTMLElement>(".tb-attachment-picker-list")!;
     fileList.scrollTop = 32;
@@ -2590,6 +2633,7 @@ test("[attachments] attachment keyboard entry opens the panel, picker cancel pre
   }
 });
 test("[attachments] attachment import delegates collision-free path selection to Obsidian and stores the returned Vault path", async () => {
+  const style = document.createElement("style"); style.textContent = readFileSync("styles.css", "utf8"); document.head.append(style);
   const table = fixture(); delete table.views[0].sort; delete table.views[0].group;
   const field: Field = { id: "files-import", name: "Files", type: "attachment", width: 220 };
   table.fields.push(field);
@@ -2626,6 +2670,15 @@ test("[attachments] attachment import delegates collision-free path selection to
     const external = new File(["payload"], "photo.png", { type: "image/png" });
     Object.defineProperty(external, "arrayBuffer", { configurable: true, value: async () => new Uint8Array([1, 255, 42]).buffer });
     const input = picker.querySelector<HTMLInputElement>(".tb-attachment-picker-file-input")!;
+    assert.equal(input.hidden, true);
+    assert.equal(dom.window.getComputedStyle(input).display, "none", "the native file input stays out of the picker layout");
+    assert.equal(input.multiple, true);
+    let inputClicks = 0;
+    const originalClick = input.click;
+    input.click = () => { inputClicks++; };
+    try { click(byEditorName(picker, "Import from device")); }
+    finally { input.click = originalClick; }
+    assert.equal(inputClicks, 1, "the visible import button still opens the hidden native input");
     Object.defineProperty(input, "files", { configurable: true, value: [external] });
     input.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
     await waitForCondition(() => createdPath === importedPath, "device file import through Vault");
@@ -2646,7 +2699,7 @@ test("[attachments] attachment import delegates collision-free path selection to
       const cancel = [...picker.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Cancel");
       cancel?.click();
     }
-    controller.destroy(); root.remove();
+    controller.destroy(); root.remove(); style.remove();
   }
 });
 test("[attachments] clipboard image paste defaults to Obsidian's folder and appends the saved Vault path", async () => {
@@ -2825,12 +2878,13 @@ test("[attachments] URL-only clipboard data is not downloaded and failed image w
     assert.match(notices.at(-1) ?? "", /disk is full/);
   } finally { controller.destroy(); root.remove(); }
 });
-test("[attachments] Obsidian-location paste gives a compatibility notice when its path API is unavailable", async () => {
+test("[attachments] a supported attachment path API failure does not create or save a false file reference", async () => {
   const table = fixture(); delete table.views[0].sort; delete table.views[0].group;
-  const field: Field = { id: "pasted-files-old-api", name: "Files", type: "attachment", width: 220 };
+  const field: Field = { id: "pasted-files-path-error", name: "Files", type: "attachment", width: 220 };
   table.fields.push(field);
-  let creates = 0; let saved: TableDocument | null = null;
+  let pathCalls = 0; let creates = 0; let saved: TableDocument | null = null;
   const plugin = { superTableSettings: normalizeSuperTableSettings(undefined), app: {
+    fileManager: { getAvailablePathForAttachment: async () => { pathCalls++; throw new Error("attachment path lookup failed"); } },
     vault: {
       getAbstractFileByPath: () => null, getFiles: () => [], getResourcePath: () => "",
       createBinary: async () => { creates++; return new TFile("unused.png"); },
@@ -2845,9 +2899,11 @@ test("[attachments] Obsidian-location paste gives a compatibility notice when it
     pointerClick(cell);
     const beforeNotices = notices.length;
     pasteClipboardImage(cell, clipboardImageFile("photo.png", "image/png"));
-    await waitForCondition(() => notices.length > beforeNotices, "unsupported API notice");
-    assert.match(notices.at(-1) ?? "", /1\.5\.7/);
-    assert.equal(creates, 0); assert.equal(saved, null);
+    await waitForCondition(() => notices.length > beforeNotices, "attachment path lookup failure notice");
+    assert.match(notices.at(-1) ?? "", /attachment path lookup failed/);
+    assert.equal(pathCalls, 1);
+    assert.equal(creates, 0, "a path lookup failure must stop before binary creation");
+    assert.equal(saved, null, "a failed import must not add an attachment path to note data");
   } finally { controller.destroy(); root.remove(); }
 });
 test("[attachments] paste settings normalize safely and resolve note-named attachment paths", () => {
@@ -2858,6 +2914,12 @@ test("[attachments] paste settings normalize safely and resolve note-named attac
   assert.equal(noteNamedAttachmentFolder("健身房器材表.md"), "附件/健身房器材表");
   assert.equal(pastedImageFileName("", "image/png", 123), "pasted-image-123.png");
   assert.equal(pastedImageFileName("IMG_3948", "image/png", 123), "IMG_3948.png");
+  for (let code = 0; code <= 0x1f; code++) {
+    const control = String.fromCharCode(code);
+    assert.equal(pastedImageFileName(`A${control}B`, "image/png", 123), "A_B.png", `U+${code.toString(16).padStart(4, "0")}`);
+  }
+  assert.equal(pastedImageFileName(`A${String.fromCharCode(0, 1, 31)}B`, "image/png", 123), "A___B.png");
+  assert.equal(pastedImageFileName("folder/ 中文 😀 A B .png ", "image/png", 123), "中文 😀 A B .png");
   assert.equal(attachmentFileNameWithSuffix("IMG_3948.png", 1), "IMG_3948 1.png");
 });
 function mountAttachmentTable(paths = ["Assets/one.png", "Assets/two.pdf"]) {
@@ -3231,6 +3293,7 @@ test("[views][storage] last view survives renderer and app recreation without ch
     assert.equal(ui.saved(), null, "switching never writes the Markdown table");
     assert.equal(JSON.stringify(table), original);
     assert.equal(writes.length, 2, "only the initial view and changed choice are stored");
+    assert.ok(writes.every((key) => key.startsWith("super-table:active-view:")), "view choices keep the existing storage key prefix");
     ui.cleanup(); ui = mount(table, true, document.body, app);
     assert.equal(ui.root.querySelector(".tb-view-name")?.textContent, "Second", "same app restores after closing a note");
     ui.cleanup(); ui = mount(table, true, document.body, viewStateApp(storage, writes));
@@ -3267,17 +3330,18 @@ test("[views][storage] missing or malformed history falls back to the stored def
   } finally { ui.cleanup(); }
 });
 
-test("[views][storage] old Obsidian local storage persists choices and isolates vaults with identical table IDs", () => {
+test("[views][storage] host local storage persists choices and isolates vaults with identical table IDs", () => {
   const table = fixture(); table.views.push({ id: "second", name: "Second", filters: emptyFilters() });
-  const app = (root: string) => ({ vault: { adapter: { getResourcePath: () => root } } });
-  const rootA = `app://test-vault-a/${table.tableId}`; const rootB = `app://test-vault-b/${table.tableId}`;
-  let ui = mount(table, true, document.body, app(rootA));
+  const storageA = new Map<string, unknown>(); const storageB = new Map<string, unknown>();
+  const appA = viewStateApp(storageA); const appB = viewStateApp(storageB);
+  let ui = mount(table, true, document.body, appA);
   try {
     click(ui.root.querySelector(".tb-view-menu-button")!); shownMenus.at(-1)!.items[1].action!({});
-    ui.cleanup(); ui = mount(table, true, document.body, app(rootA));
+    ui.cleanup(); ui = mount(table, true, document.body, viewStateApp(storageA));
     assert.equal(ui.root.querySelector(".tb-view-name")?.textContent, "Second");
-    ui.cleanup(); ui = mount(table, true, document.body, app(rootB));
+    ui.cleanup(); ui = mount(table, true, document.body, appB);
     assert.equal(ui.root.querySelector(".tb-view-name")?.textContent, table.views[0].name);
+    assert.equal(storageB.get([...storageA.keys()][0]), table.views[0].id, "another vault starts from and stores its own default view");
     assert.equal(ui.saved(), null);
   } finally { ui.cleanup(); }
 });
@@ -3488,7 +3552,9 @@ test("[fields] column names edit inline; option menus mark the selected choice",
   const pill = ui.root.querySelector(".tb-cell .tb-pill")!; click(pill); click(pill.closest("td")!.querySelector(".tb-cell-action")!);
   const menu = shownMenus.at(-1)!; assert.equal(menu.items.find((item) => item.title === "PC")?.icon, "check");
   assert.ok(menu.items.every((item) => !item.titleFragment?.querySelector(".tb-config-menu-label")), "cell option menus retain their own layout");
-  assert.ok(menu.items.some((item) => item.title === "New option…")); assert.ok(menu.items.some((item) => item.title === "Edit options…")); ui.cleanup();
+  assert.deepEqual(menu.items.slice(0, 2).map((item) => [item.title, item.section]), [["PC", "super-table-choices"], ["MAC", "super-table-choices"]]);
+  assert.deepEqual(menu.items.slice(2).map((item) => item.title), ["Clear", "New option…", "Edit options…"], "choice actions stay after the ordered options");
+  assert.ok(menu.items.slice(2).every((item) => !item.section), "choice actions keep the host menu layout"); ui.cleanup();
 });
 function visibleChoiceChecks(menu: Menu): boolean[] {
   const preview = new JSDOM("<!doctype html><head></head><body><div class='menu'></div></body>");
@@ -3497,10 +3563,13 @@ function visibleChoiceChecks(menu: Menu): boolean[] {
     const style = doc.createElement("style"); style.textContent = readFileSync("styles.css", "utf8"); doc.head.append(style);
     return menu.items.slice(0, 2).map((item) => {
       const row = doc.createElement("div"); row.className = "menu-item";
+      if (item.section) row.dataset.section = item.section;
       const icon = doc.createElement("div"); icon.className = "menu-item-icon"; icon.textContent = item.icon;
+      if (item.icon) icon.append(doc.createElementNS("http://www.w3.org/2000/svg", "svg"));
       const title = doc.createElement("div"); title.className = "menu-item-title";
       assert.ok(item.titleFragment, "choice titles must retain the renderer's DOM markup");
       title.append(doc.importNode(item.titleFragment, true)); row.append(icon, title); doc.querySelector(".menu")!.append(row);
+      assert.equal(icon.querySelector("svg") !== null, item.icon === "check", "only selected options render a check SVG");
       return item.icon === "check" && preview.window.getComputedStyle(icon).visibility === "visible";
     });
   } finally { preview.window.close(); }
@@ -3523,6 +3592,10 @@ test("[fields][layout] single-choice menus show the check only on the selected c
       const menu = shownMenus.at(-1)!;
       assert.equal(menu.useNativeMenu, false);
       assert.deepEqual(menu.items.slice(0, 2).map((item) => item.title), ["PC", "MAC"]);
+      assert.deepEqual(menu.items.slice(0, 2).map((item) => item.section), ["super-table-choices", "super-table-choices"], "the public section is limited to choice options");
+      assert.deepEqual(menu.items.slice(2).map((item) => item.title), ["Clear", "New option…", "Edit options…"], "clear and option management actions remain in their original order");
+      assert.ok(menu.items.slice(2).every((item) => !item.section), "actions stay in the host menu layout");
+      assert.ok(menu.items.slice(0, 2).every((item) => !item.titleFragment?.querySelector(".tb-choice-option-unselected")), "choice titles no longer need an unselected marker");
       return menu;
     };
     try {
@@ -3537,6 +3610,72 @@ test("[fields][layout] single-choice menus show the check only on the selected c
       assert.deepEqual(visibleChoiceChecks(open()), [false, false]);
     } finally { ui.cleanup(); }
   }
+});
+test("[fields][layout] choice sections reserve an empty leading icon slot without adding an unselected SVG", () => {
+  const preview = new JSDOM("<!doctype html><head></head><body></body>");
+  try {
+    const doc = preview.window.document;
+    const style = doc.createElement("style"); style.textContent = readFileSync("styles.css", "utf8"); doc.head.append(style);
+    const menu = doc.createElement("div"); menu.className = "menu"; doc.body.append(menu);
+    const row = (titleText: string, iconName?: string) => {
+      const item = doc.createElement("div"); item.className = "menu-item"; item.dataset.section = "super-table-choices";
+      const icon = doc.createElement("div"); icon.className = "menu-item-icon";
+      if (iconName) icon.append(doc.createElementNS("http://www.w3.org/2000/svg", "svg"));
+      const title = doc.createElement("div"); title.className = "menu-item-title"; title.textContent = titleText;
+      item.append(icon, title); menu.append(item); return { item, icon, title };
+    };
+    const selected = row("Selected choice", "check");
+    const unselected = row("Unselected choice");
+    assert.equal(selected.icon.querySelector("svg") !== null, true);
+    assert.equal(unselected.icon.querySelector("svg"), null, "the unselected option has no check SVG");
+    assert.equal(unselected.item.dataset.section, selected.item.dataset.section, "both option rows use the same public section");
+    const selectedStyle = preview.window.getComputedStyle(selected.icon);
+    const unselectedStyle = preview.window.getComputedStyle(unselected.icon);
+    assert.notEqual(unselectedStyle.display, "none", "the empty leading icon element remains in layout");
+    assert.notEqual(unselectedStyle.width, "", "the empty icon element keeps a reserved leading width");
+    assert.equal(unselectedStyle.width, selectedStyle.width, "selected and unselected titles share the same leading slot");
+    assert.equal(unselected.title.previousElementSibling, unselected.icon, "the title follows the leading slot in the host menu row");
+    const unrelated = row("Unrelated action"); delete unrelated.item.dataset.section;
+    const nestedIcon = doc.createElement("span"); nestedIcon.className = "menu-item-icon"; unselected.title.append(nestedIcon);
+    assert.equal(preview.window.getComputedStyle(unrelated.icon).width, "", "unmarked menus keep the host icon layout");
+    assert.equal(preview.window.getComputedStyle(nestedIcon).width, "", "icons inside a title do not become leading slots");
+  } finally { preview.window.close(); }
+});
+test("[views][layout] configuration menu sections keep text, content icons and checks in their own columns", () => {
+  const preview = new JSDOM("<!doctype html><head></head><body></body>");
+  try {
+    const doc = preview.window.document;
+    const style = doc.createElement("style"); style.textContent = readFileSync("styles.css", "utf8"); doc.head.append(style);
+    const row = (scoped: boolean, hasIcon: boolean, checked: boolean) => {
+      const item = doc.createElement("div"); item.className = "menu-item";
+      if (scoped) item.dataset.section = hasIcon ? "super-table-config-icon" : "super-table-config";
+      const icon = doc.createElement("div"); icon.className = "menu-item-icon";
+      if (hasIcon) icon.append(doc.createElement("svg"));
+      const title = doc.createElement("div"); title.className = "menu-item-title";
+      const label = doc.createElement("span"); label.className = "tb-config-menu-label"; label.textContent = "Option"; title.append(label);
+      item.append(icon, title);
+      const check = doc.createElement("div"); check.className = "menu-item-icon mod-checked";
+      if (checked) check.append(doc.createElement("svg"));
+      item.append(check);
+      doc.body.append(item);
+      return { item, icon, title, check };
+    };
+    for (const hasIcon of [false, true]) for (const checked of [false, true]) {
+      const entry = row(true, hasIcon, checked);
+      const computed = (element: Element) => preview.window.getComputedStyle(element);
+      assert.equal(entry.item.dataset.section, hasIcon ? "super-table-config-icon" : "super-table-config");
+      assert.equal(computed(entry.item).display, "grid");
+      assert.equal(computed(entry.item).gridTemplateColumns, hasIcon ? "16px minmax(0, 1fr) 16px" : "minmax(0, 1fr) 16px");
+      assert.equal(computed(entry.title).gridColumn, hasIcon ? "2" : "1");
+      if (!hasIcon) assert.equal(computed(entry.icon).display, "none", "text-only options have no empty leading icon slot");
+      assert.equal(computed(entry.check).gridColumn, "-2", "selected and unselected rows reserve the fixed trailing check column");
+      assert.equal(entry.check.querySelector("svg") !== null, checked);
+    }
+    const ordinary = row(false, true, true);
+    assert.notEqual(preview.window.getComputedStyle(ordinary.item).display, "grid", "a title marker alone no longer changes unrelated menu layout");
+    doc.body.classList.add("is-mobile");
+    assert.notEqual(preview.window.getComputedStyle(row(true, true, true).item).display, "grid", "desktop column rules do not override mobile menus");
+  } finally { preview.window.close(); }
 });
 test("[fields][interaction][layout] multi-choice panels keep all options visible and toggle checked values without losing other choices", async () => {
   const ui = mount(); const field = ui.table.fields[2]; const [a, b] = field.options!;
@@ -3949,6 +4088,7 @@ test("[views] editing a field outside active sort, group and filter rules update
   } finally { ui.cleanup(); }
 });
 test("[layout] floating horizontal scrollbar appears while a wide table extends below the viewport and stays synchronized", async () => {
+  const style = document.createElement("style"); style.textContent = readFileSync("styles.css", "utf8"); document.head.append(style);
   const ui = mount(); const wrap = ui.root.querySelector<HTMLElement>(".tb-table-scroll")!;
   const proxy = document.body.querySelector<HTMLElement>(".tb-floating-scrollbar")!;
   const oldClientHeight = Object.getOwnPropertyDescriptor(document.documentElement, "clientHeight");
@@ -3957,8 +4097,11 @@ test("[layout] floating horizontal scrollbar appears while a wide table extends 
   let bottom = 850;
   wrap.getBoundingClientRect = () => ({ left: 20, right: 620, top: 50, bottom, width: 600, height: bottom - 50, x: 20, y: 50, toJSON: () => ({}) } as DOMRect);
   try {
+    assert.equal(proxy.hidden, true);
+    assert.equal(dom.window.getComputedStyle(proxy).display, "none");
     dom.window.dispatchEvent(new dom.window.Event("scroll")); await settle();
     assert.equal(proxy.hidden, false); assert.equal(proxy.style.left, "20px");
+    assert.notEqual(dom.window.getComputedStyle(proxy).display, "none", "the scrollbar becomes visible when the table needs it");
     assert.equal(proxy.getAttribute("aria-valuemax"), "500");
     proxy.scrollLeft = 120; proxy.dispatchEvent(new dom.window.Event("scroll"));
     assert.equal(wrap.scrollLeft, 120);
@@ -3966,8 +4109,10 @@ test("[layout] floating horizontal scrollbar appears while a wide table extends 
     assert.equal(proxy.scrollLeft, 250);
     bottom = 650; dom.window.dispatchEvent(new dom.window.Event("resize")); await settle();
     assert.equal(proxy.hidden, true);
+    assert.equal(dom.window.getComputedStyle(proxy).display, "none", "the scrollbar leaves the layout when the table bottom is visible");
   } finally {
-    ui.cleanup();
+    ui.cleanup(); style.remove();
+    assert.equal(proxy.isConnected, false, "destroying the table removes its floating scrollbar");
     if (oldClientHeight) Object.defineProperty(document.documentElement, "clientHeight", oldClientHeight);
     else delete (document.documentElement as unknown as { clientHeight?: number }).clientHeight;
   }
@@ -4044,6 +4189,253 @@ test("[interaction] dates and links use explicit edit buttons, Markdown text use
   assert.equal(textCell.querySelector("textarea"), null);
   const text = openMarkdownEditor(textCell);
   text.focus(); assert.ok(text.closest("td")!.classList.contains("is-cell-active")); assert.equal(text.readOnly, false); ui.cleanup();
+});
+test("[fields][layout][interaction] date editors keep native input sizing and usable text fallback across picker types", async () => {
+  const table = fixture();
+  table.fields = [
+    { id: "date", name: "Date", type: "date", dateFormat: "iso-date" },
+    { id: "datetime", name: "Datetime", type: "date", dateFormat: "iso-datetime" },
+    { id: "time", name: "Time", type: "date", dateFormat: "time" },
+  ];
+  table.records = [
+    { id: "existing", values: { date: "2026-10-06T08:09:10", datetime: "2026-10-06T09:15:37", time: "2026-10-06T08:09:10" } },
+    { id: "empty", values: { date: "", datetime: "", time: "" } },
+  ];
+  const style = document.createElement("style"); style.textContent = readFileSync("styles.css", "utf8");
+  const hostStyle = document.createElement("style");
+  hostStyle.textContent = `
+    input { position: relative; width: 18px; height: 18px; min-width: 11px; min-height: 12px; padding: 4px; border: 2px solid rgb(1, 2, 3); }
+    .theme-date-host input[type]:focus {
+      position: fixed; width: 18px; height: 18px; min-width: 11px; min-height: 12px;
+      padding: 4px 9px; border: 3px solid rgb(4, 5, 6);
+    }
+  `;
+  // JSDOM lets a later, less-specific rule win; keep the representative host rule first and cover specificity in a real browser.
+  document.head.append(hostStyle, style);
+
+  type PickerBehavior = "success" | "fallback" | "both-throw";
+  let behavior: PickerBehavior = "success";
+  let showPickerCalls = 0;
+  let fallbackClicks = 0;
+  const inputPrototype = dom.window.HTMLInputElement.prototype;
+  const previousShowPicker = Object.getOwnPropertyDescriptor(inputPrototype, "showPicker");
+  const previousClick = Object.getOwnPropertyDescriptor(inputPrototype, "click");
+  const originalClick = inputPrototype.click;
+  let cleanup: (() => void) | undefined;
+  try {
+    Object.defineProperty(inputPrototype, "showPicker", {
+      configurable: true,
+      value(this: HTMLInputElement) {
+        if (!this.classList.contains("tb-date-native-picker")) return;
+        showPickerCalls++;
+        if (behavior !== "success") throw new Error("picker API unavailable in this test");
+      },
+    });
+    Object.defineProperty(inputPrototype, "click", {
+      configurable: true,
+      value(this: HTMLInputElement) {
+        if (!this.classList.contains("tb-date-native-picker")) return originalClick.call(this);
+        fallbackClicks++;
+        if (behavior === "both-throw") throw new Error("native click unavailable in this test");
+      },
+    });
+
+    const ui = mount(table); ui.root.classList.add("theme-date-host");
+    cleanup = ui.cleanup;
+    const cellFor = (fieldId: string, rowId: string) => ui.root.querySelector<HTMLTableCellElement>(`tr[data-row-id="${rowId}"] td[data-field-id="${fieldId}"]`)!;
+    const cases: Array<{ fieldId: string; rowId: string; pickerType: string; pickerValue: string; inputValue: string; behavior: PickerBehavior }> = [
+      { fieldId: "date", rowId: "existing", pickerType: "date", pickerValue: "2026-10-06", inputValue: "2026-10-06", behavior: "success" },
+      { fieldId: "datetime", rowId: "existing", pickerType: "datetime-local", pickerValue: "2026-10-06T09:15", inputValue: "2026-10-06 09:15", behavior: "fallback" },
+      { fieldId: "time", rowId: "existing", pickerType: "time", pickerValue: "08:09", inputValue: "08:09", behavior: "both-throw" },
+      { fieldId: "date", rowId: "empty", pickerType: "date", pickerValue: "", inputValue: "", behavior: "fallback" },
+      { fieldId: "datetime", rowId: "empty", pickerType: "datetime-local", pickerValue: "", inputValue: "", behavior: "both-throw" },
+      { fieldId: "time", rowId: "empty", pickerType: "time", pickerValue: "", inputValue: "", behavior: "success" },
+    ];
+    let previousEditor: HTMLInputElement | undefined;
+    for (const item of cases) {
+      const cell = cellFor(item.fieldId, item.rowId);
+      click(cell);
+      if (previousEditor) {
+        assert.equal(previousEditor.isConnected, false, "selecting another cell closes the prior editor");
+        assert.equal(ui.saved(), null, "Escape cancellation must not save a draft");
+      }
+      const showBefore = showPickerCalls;
+      const clickBefore = fallbackClicks;
+      behavior = item.behavior;
+      click(cell.querySelector(".tb-cell-action")!);
+      const input = cell.querySelector<HTMLInputElement>(".tb-date-input")!;
+      const picker = cell.querySelector<HTMLInputElement>(".tb-date-native-picker")!;
+      assert.ok(input, "the formatted text editor stays available");
+      assert.equal(input.value, item.inputValue);
+      assert.equal(picker.type, item.pickerType);
+      assert.equal(picker.value, item.pickerValue);
+      assert.equal(picker.matches(".tablebase-root .tb-cell .tb-date.is-editing > input.tb-date-native-picker"), true, "the native input is tested in its rendered editing structure");
+      assert.equal(showPickerCalls, showBefore + 1, "opening the editor attempts showPicker once");
+      assert.equal(fallbackClicks, clickBefore + (item.behavior === "success" ? 0 : 1), "a failed showPicker uses the click fallback");
+
+      picker.focus();
+      const computed = dom.window.getComputedStyle(picker);
+      assert.equal(computed.position, "absolute");
+      assert.equal(computed.borderTopWidth, "0px");
+      assert.equal(computed.borderRightWidth, "0px");
+      assert.equal(computed.borderBottomWidth, "0px");
+      assert.equal(computed.borderLeftWidth, "0px");
+      assert.equal(computed.width, "1px");
+      assert.equal(computed.height, "1px");
+      assert.equal(computed.minWidth, "1px");
+      assert.equal(computed.minHeight, "1px");
+      assert.equal(computed.paddingTop, "0px");
+      assert.equal(computed.paddingRight, "0px");
+      assert.equal(computed.paddingBottom, "0px");
+      assert.equal(computed.paddingLeft, "0px");
+      assert.equal(computed.opacity, "0");
+      input.focus();
+      input.value = "temporary invalid draft";
+      input.dispatchEvent(new dom.window.Event("input"));
+      input.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      assert.equal(input.value, item.inputValue, "Escape restores the formatted value");
+      previousEditor = input;
+    }
+    click(cellFor("date", "existing"));
+    assert.equal(previousEditor?.isConnected, false);
+    assert.equal(ui.saved(), null, "closing a cancelled editor does not save");
+
+    behavior = "success";
+    const dateCell = cellFor("date", "existing"); click(dateCell); click(dateCell.querySelector(".tb-cell-action")!);
+    const datePicker = dateCell.querySelector<HTMLInputElement>(".tb-date-native-picker")!;
+    datePicker.value = "2026-10-09"; datePicker.dispatchEvent(new dom.window.Event("change"));
+    await waitForCondition(() => ui.saved()?.records.find((row) => row.id === "existing")?.values.date === "2026-10-09T08:09:10", "date picker selection preserves hidden time and seconds");
+
+    const datetimeCell = cellFor("datetime", "existing"); click(datetimeCell); click(datetimeCell.querySelector(".tb-cell-action")!);
+    const datetimePicker = datetimeCell.querySelector<HTMLInputElement>(".tb-date-native-picker")!;
+    datetimePicker.value = "2026-10-09T14:30"; datetimePicker.dispatchEvent(new dom.window.Event("change"));
+    await waitForCondition(() => ui.saved()?.records.find((row) => row.id === "existing")?.values.datetime === "2026-10-09T14:30:37", "datetime picker selection preserves seconds");
+
+    const timeCell = cellFor("time", "existing"); click(timeCell); click(timeCell.querySelector(".tb-cell-action")!);
+    const timePicker = timeCell.querySelector<HTMLInputElement>(".tb-date-native-picker")!;
+    timePicker.value = "15:40"; timePicker.dispatchEvent(new dom.window.Event("change"));
+    await waitForCondition(() => ui.saved()?.records.find((row) => row.id === "existing")?.values.time === "2026-10-06T15:40:10", "time picker selection preserves the date and seconds");
+
+    behavior = "both-throw";
+    const emptyDatetimeCell = cellFor("datetime", "empty"); click(emptyDatetimeCell); click(emptyDatetimeCell.querySelector(".tb-cell-action")!);
+    const fallbackText = emptyDatetimeCell.querySelector<HTMLInputElement>(".tb-date-input")!;
+    assert.ok(fallbackText.isConnected, "the text editor remains usable when both picker APIs throw");
+    fallbackText.value = "2026-10-10 16:45"; fallbackText.dispatchEvent(new dom.window.Event("change"));
+    await waitForCondition(() => ui.saved()?.records.find((row) => row.id === "empty")?.values.datetime === "2026-10-10T16:45", "text input saves when both picker APIs throw");
+
+    const cancelCell = cellFor("datetime", "empty"); click(cancelCell); click(cancelCell.querySelector(".tb-cell-action")!);
+    const cancelInput = cancelCell.querySelector<HTMLInputElement>(".tb-date-input")!;
+    const lastSaved = ui.saved();
+    cancelInput.value = "2026-10-11 09:00"; cancelInput.dispatchEvent(new dom.window.Event("input"));
+    cancelInput.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    click(cellFor("time", "empty"));
+    assert.equal(ui.saved(), lastSaved, "Escape cancellation leaves the last saved table untouched");
+    assert.equal(ui.saved()?.records.find((row) => row.id === "empty")?.values.datetime, "2026-10-10T16:45");
+
+    const clearCell = cellFor("date", "existing"); click(clearCell); click(clearCell.querySelector(".tb-cell-action")!);
+    const clearPicker = clearCell.querySelector<HTMLInputElement>(".tb-date-native-picker")!;
+    clearPicker.value = ""; clearPicker.dispatchEvent(new dom.window.Event("change"));
+    await waitForCondition(() => ui.saved()?.records.find((row) => row.id === "existing")?.values.date === "", "clearing a date picker value saves an empty cell");
+  } finally {
+    try { cleanup?.(); }
+    finally {
+      style.remove(); hostStyle.remove();
+      if (previousShowPicker) Object.defineProperty(inputPrototype, "showPicker", previousShowPicker);
+      else delete (inputPrototype as HTMLInputElement & { showPicker?: () => void }).showPicker;
+      if (previousClick) Object.defineProperty(inputPrototype, "click", previousClick);
+      else delete (inputPrototype as HTMLInputElement & { click?: () => void }).click;
+    }
+  }
+});
+test("[layout][interaction][markdown] resizing covers the table controls and restores its cursor after completion or cancellation", async () => {
+  const style = document.createElement("style"); style.textContent = readFileSync("styles.css", "utf8"); document.head.append(style);
+  const previousMarkdownRender = MarkdownRenderer.render;
+  const table = fixture();
+  table.fields = [
+    { id: "note", name: "Note", type: "text" },
+    { id: "unmapped", name: "Ambiguous task", type: "text" },
+    { id: "pending", name: "Pending task", type: "text" },
+    { id: "url", name: "URL", type: "link" },
+  ];
+  table.records = [{ id: "row", values: {
+    note: "Editable note", unmapped: "- [ ] first\n- [ ] second", pending: "- [ ] pending", url: "https://example.org",
+  } }];
+  MarkdownRenderer.render = async (_app, markdown, element) => {
+    if (!markdown.includes("[ ]")) { element.textContent = markdown; return; }
+    const list = document.createElement("ul");
+    const item = document.createElement("li"); item.classList.add("task-list-item");
+    const checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.classList.add("task-list-item-checkbox");
+    item.append(checkbox, document.createTextNode(" task")); list.append(item); element.replaceChildren(list);
+  };
+
+  const root = document.createElement("div"); document.body.append(root);
+  let releaseSave!: () => void;
+  const saveGate = new Promise<void>((resolve) => { releaseSave = resolve; });
+  let holdFirstSave = true;
+  let destroy: (() => void) | undefined;
+  try {
+    const controller = renderTable({ app: {} } as any, JSON.stringify(table), {
+      root, sourcePath: "resize-cursor.md",
+      save: async (_, next) => {
+        if (holdFirstSave) { holdFirstSave = false; await saveGate; }
+        return JSON.stringify(next);
+      },
+    });
+    destroy = () => controller.destroy();
+    await waitForCondition(() => !!root.querySelector("input.task-list-item-checkbox[disabled]")
+      && !!root.querySelector("button.tb-markdown-task-toggle"), "mapped and unmapped task controls render");
+    const editableText = root.querySelector<HTMLElement>('td[data-field-id="note"] .tb-markdown-content')!;
+    assert.equal(editableText.textContent, "Editable note", "the Markdown text remains an editable cell preview");
+    const disabledMarkdownCheckbox = root.querySelector<HTMLInputElement>("input.task-list-item-checkbox[disabled]")!;
+    const taskButton = root.querySelector<HTMLButtonElement>("button.tb-markdown-task-toggle")!;
+    click(taskButton);
+    await waitForCondition(() => taskButton.disabled, "Markdown task button disables during its queued write");
+    const link = root.querySelector<HTMLAnchorElement>('td[data-field-id="url"] a.tb-link-text')!;
+    const targets = [disabledMarkdownCheckbox, taskButton, editableText, link];
+    for (const target of targets) {
+      const cell = target.closest("td.tb-cell"); assert.ok(cell, `${target.tagName}.${target.className} is nested in a real table cell`);
+      assert.ok(cell!.closest("tr.tb-data-row"), "the cell belongs to a rendered data row");
+      assert.ok(cell!.closest("table.tb-grid"), "the row belongs to the rendered grid");
+      assert.ok(cell!.closest(".tb-table-scroll"), "the grid belongs to the real scroll wrapper");
+      assert.ok(cell!.closest(".tb-shell"), "the scroll wrapper belongs to the table shell");
+    }
+    const shell = root.querySelector<HTMLElement>(".tb-shell")!;
+    const scroll = root.querySelector<HTMLElement>(".tb-table-scroll")!;
+    assert.ok(targets.every((target) => scroll.contains(target)), "disabled controls, editable text and links are inside the active resize selector scope");
+    // JSDOM gives later low-specificity control rules priority, so only the uncontested shell cursor is computed here.
+    const pointerEvent = (type: string, pointerId: number) => {
+      const event = new dom.window.MouseEvent(type, { bubbles: true, cancelable: true, clientX: 20 });
+      Object.defineProperty(event, "pointerId", { value: pointerId });
+      return event;
+    };
+    const drag = (endType: "pointerup" | "pointercancel", pointerId: number) => {
+      const handle = root.querySelector<HTMLElement>(".tb-resize-handle")!;
+      const captures = new Set<number>();
+      Object.defineProperties(handle, {
+        setPointerCapture: { configurable: true, value: (id: number) => { captures.add(id); } },
+        hasPointerCapture: { configurable: true, value: (id: number) => captures.has(id) },
+        releasePointerCapture: { configurable: true, value: (id: number) => { captures.delete(id); } },
+      });
+      const start = handle.onpointerdown;
+      assert.ok(start, "the real table resize start handler is installed");
+      start.call(handle, pointerEvent("pointerdown", pointerId) as unknown as PointerEvent);
+      assert.equal(root.classList.contains("tb-resizing"), true, "the actual table resize handler enters its drag state");
+      assert.equal(dom.window.getComputedStyle(shell).cursor, "col-resize", "the active table shell uses the resize cursor");
+      handle.dispatchEvent(pointerEvent("pointermove", pointerId));
+      assert.equal(dom.window.getComputedStyle(shell).cursor, "col-resize");
+      handle.dispatchEvent(pointerEvent(endType, pointerId));
+      assert.equal(root.classList.contains("tb-resizing"), false, `${endType} leaves the drag state`);
+      assert.notEqual(dom.window.getComputedStyle(shell).cursor, "col-resize", "the table shell cursor is restored");
+      assert.ok(targets.every((target) => scroll.contains(target)), "all relevant controls remain under the table scroll wrapper after the drag");
+    };
+
+    drag("pointerup", 1);
+    drag("pointercancel", 2);
+    releaseSave();
+  } finally {
+    releaseSave(); await settle();
+    destroy?.(); root.remove(); MarkdownRenderer.render = previousMarkdownRender; style.remove();
+  }
 });
 test("[interaction] link editor cancels without saving and uses the URL as display text when the label is blank", async () => {
   const table = fixture(); table.fields.push({ id: "url", name: "网址", type: "link" }); table.records[0].values.url = "example.com";
@@ -5216,6 +5608,21 @@ test("[views][records] group settings remain open after a reading-view save recr
   ]);
   assert.ok(menu.items.every((item) => item.title !== "Group by…"));
   assert.ok(menu.items.every((item) => item.titleFragment?.querySelector(".tb-config-menu-label")), "group field menus share the fixed check column");
+  assert.ok(menu.items.every((item) => item.section === "super-table-config-icon"), "the whole icon field menu stays in one section without extra separators");
+  menu.hide();
+  const previousMobile = Platform.isMobile;
+  Platform.isMobile = true;
+  let mobileUi: ReturnType<typeof mount> | undefined;
+  try {
+    const mobileTable = fixture(); mobileTable.tableId = `${ui.table.tableId}-mobile`;
+    mobileUi = mount(mobileTable);
+    click(byLabel(mobileUi.root, "Group"));
+    const mobileSelect = [...document.querySelectorAll<HTMLButtonElement>(".tb-group-select")].at(-1)!;
+    click(mobileSelect);
+    const mobileMenu = shownMenus.at(-1)!;
+    assert.ok(mobileMenu.items.every((item) => item.section === "super-table-config-icon"), "mobile group menus retain one icon-backed section");
+    mobileMenu.hide();
+  } finally { mobileUi?.cleanup(); Platform.isMobile = previousMobile; }
   menu.items.find((item) => item.title === ui.table.fields[1].name)!.action!({});
   await settle(); const saved = ui.saved()!; ui.cleanup();
   const root = document.createElement("div"); document.body.append(root);
@@ -5337,6 +5744,8 @@ test("[localization] Chinese renderer translates toolbar, menus, option colors a
     assert.ok(columnMenu.items.some((item) => item.title === "编辑列"));
     assert.ok(!columnMenu.items.some((item) => item.title === "单选" || item.title === "多选"));
     assert.deepEqual(columnMenu.items.find((item) => item.title === "文本对齐")!.child!.items.map((item) => item.title), ["左对齐", "居中", "右对齐"]);
+    assert.ok(columnMenu.items.find((item) => item.title === "文本对齐")!.child!.items.every((item) => item.section === "super-table-config-icon"));
+    assert.ok(columnMenu.items.every((item) => item.section !== "super-table-config" && item.section !== "super-table-config-icon"), "ordinary column actions keep their host layout");
     assert.ok(!columnMenu.items.some((item) => item.title === "移动列"));
     columnMenu.items.find((item) => item.title === "编辑列")!.action!({});
     assert.ok([...document.querySelectorAll<HTMLElement>(".tb-option-color-trigger")].some((element) => {
@@ -5414,11 +5823,17 @@ test("[fields][localization] checkbox conversions recognize saved text from eith
   }
 });
 
-test("[localization][table-block] plugin startup follows Obsidian language for commands and editor menus, including older app versions", async () => {
+test("[localization][table-block] startup ignores stale browser language and defaults safely when the Obsidian API throws", async () => {
   const previous = window.localStorage.getItem("language");
   try {
-    for (const [code, legacy, stored] of [["zh", false, "en"], ["en", false, "zh"], ["en", true, "zh"]] as const) {
-      setObsidianLanguage(code, legacy); window.localStorage.setItem("language", stored);
+    const cases = [
+      { language: "zh", stored: "en", expected: "zh-CN" },
+      { language: "en", stored: "zh", expected: "en" },
+      { language: "throws", stored: "zh", expected: "en" },
+    ] as const;
+    for (const scenario of cases) {
+      if (scenario.language === "throws") setObsidianLanguageFailure(); else setObsidianLanguage(scenario.language);
+      window.localStorage.setItem("language", scenario.stored);
       const commands: any[] = []; let ribbonLabel = ""; let editorMenu: any; const registeredLanguages: string[] = [];
       const plugin = Object.assign(new SuperTablePlugin({} as any, {} as any), {
         app: { workspace: { on: (_: string, callback: any) => { editorMenu = callback; }, getActiveViewOfType: () => null } },
@@ -5427,14 +5842,14 @@ test("[localization][table-block] plugin startup follows Obsidian language for c
         addCommand: (command: any) => { commands.push(command); },
       });
       await plugin.onload();
-      const chinese = legacy || code === "zh";
-      assert.equal(getLocale(), chinese ? "zh-CN" : "en");
+      const chinese = scenario.expected === "zh-CN";
+      assert.equal(getLocale(), scenario.expected);
       assert.equal(ribbonLabel, chinese ? "插入 Super Table" : "Insert Super Table");
       assert.equal(plugin.manifest.description, chinese
         ? "创建可编辑的数据表，设置字段类型和日期格式、按字段分组，并为同一批记录创建多个命名视图。"
         : "Create editable data tables with typed fields, date formats, grouping, and multiple named views over shared records.");
       assert.deepEqual(registeredLanguages, ["super-table"]);
-      assert.deepEqual(commands.map((command) => command.id), ["insert-table", "import-smart-table", "convert-markdown-table", "convert-super-table-to-markdown"]);
+      assert.deepEqual(commands.map((command) => command.id), ["insert-table", "import-smart-table", "convert-markdown-table", "convert-to-markdown"]);
       assert.deepEqual(commands.map((command) => command.name), chinese
         ? ["插入表格", "导入 Smart Table 代码块", "将 Markdown 表格转换为 Super Table", "将 Super Table 表格转换为 Markdown"]
         : ["Insert table", "Import Smart Table block", "Convert Markdown table to Super Table", "Convert Super Table to Markdown"]);
@@ -5586,6 +6001,7 @@ test("[views][interaction] desktop filter field menus preserve drafts, cancel be
     assert.equal(menu.ownerDocument, document);
     assert.deepEqual(menu.items.map((item) => item.title), table.fields.map((field) => field.name));
     assert.ok(menu.items.every((item) => item.titleFragment?.querySelector(".tb-config-menu-label")), "all field rows reserve the same scoped check column");
+    assert.ok(menu.items.every((item) => item.section === "super-table-config-icon"));
     assert.deepEqual(menu.items.map((item) => item.icon), ["text", "chevron-down-circle", "tags"]);
     assert.deepEqual(menu.items.map((item) => item.checked), [true, false, false]);
     assert.equal(trigger.getAttribute("aria-expanded"), "true");
@@ -5661,6 +6077,8 @@ test("[views][interaction] desktop filter selectors toggle and switch without ho
       assert.equal(menu.hidden, false, "the same opening gesture must not close the new menu");
       assert.equal(menu.useNativeMenu, false); assert.equal(menu.ownerDocument, document);
       assert.ok(menu.items.every((item) => item.titleFragment?.querySelector(".tb-config-menu-label")), "operator, relationship and field menus share the check-column scope");
+      const expectedSection = trigger === field ? "super-table-config-icon" : "super-table-config";
+      assert.ok(menu.items.every((item) => item.section === expectedSection), "each field, operator or relationship menu stays within its matching section");
       assert.equal(trigger.getAttribute("aria-expanded"), "true");
       assert.equal([field, operator, mode].filter((button) => button.getAttribute("aria-expanded") === "true").length, 1);
       previousMenu = menu;
@@ -5936,6 +6354,65 @@ test("[views][layout][localization] filter controls use accessible labels withou
       assert.ok(panel.textContent?.includes(t("Meet all conditions")));
     } finally { ui.cleanup(); setLanguage("en"); }
   }
+});
+
+test("[layout][views][fields][attachments] hidden accessible labels stay associated and clipped in real UI DOM", async () => {
+  const style = document.createElement("style"); style.textContent = readFileSync("styles.css", "utf8"); document.head.append(style);
+  const assertHiddenLabel = (control: Element, expectedText?: string) => {
+    const ids = control.getAttribute("aria-labelledby")?.trim().split(/\s+/).filter(Boolean) ?? [];
+    assert.ok(ids.length, "the control references its accessible label");
+    const labels = ids.map((id) => document.getElementById(id));
+    const label = labels.find((element) => element?.classList.contains("tb-sr-only"));
+    assert.ok(label, "the reference resolves to a real sr-only label");
+    if (expectedText) assert.equal(label.textContent, expectedText);
+    assert.equal(label.isConnected, true);
+    assert.equal(label.hidden, false);
+    assert.notEqual(label.getAttribute("aria-hidden"), "true");
+    const computed = dom.window.getComputedStyle(label);
+    assert.equal(computed.position, "absolute");
+    assert.notEqual(computed.display, "none");
+    assert.notEqual(computed.visibility, "hidden");
+    assert.equal(computed.width, "1px"); assert.equal(computed.height, "1px");
+    assert.equal(computed.overflow, "hidden");
+    assert.match(computed.clip, /rect\(/); assert.equal(computed.clipPath, "", "the accessible label remains clipped without clip-path");
+  };
+  try {
+    const prompt = promptForm({} as any, "Rename view", [{ label: "View name", value: "Draft" }], undefined, { hideSingleFieldLabel: true });
+    try {
+      const form = document.querySelector<HTMLFormElement>(".tb-dialog form")!;
+      const input = form.querySelector<HTMLInputElement>("input")!;
+      assertHiddenLabel(input, "View name");
+      form.dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true }));
+      assert.deepEqual(await prompt, ["Draft"]);
+    } finally { document.querySelector<HTMLButtonElement>(".modal-close-button")?.click(); }
+
+    const filtered = mount();
+    try {
+      addFilterDraft(filtered.root);
+      const panel = document.querySelector<HTMLElement>(".tb-filter-popover")!;
+      for (const selector of [".tb-filter-field", ".tb-filter-operator", ".tb-filter-mode"]) {
+        assertHiddenLabel(panel.querySelector(selector)!);
+      }
+    } finally { filtered.cleanup(); }
+
+    const table = fixture();
+    table.fields.push({ id: "sr-date", name: "Date", type: "date" });
+    table.records[0].values["sr-date"] = "2026-10-07";
+    const dated = mount(table);
+    try {
+      const cell = dated.root.querySelector<HTMLTableCellElement>('td[data-field-id="sr-date"]')!;
+      click(cell); click(byLabel(cell, "Edit Date"));
+      assertHiddenLabel(cell.querySelector(".tb-date-input")!, "Date value");
+      assertHiddenLabel(cell.querySelector(".tb-cell-action")!, "Choose date for Date");
+    } finally { dated.cleanup(); }
+
+    const attached = mountAttachmentTable();
+    try {
+      pointerClick(attached.cell); pointerClick(attached.cell);
+      const close = document.querySelector<HTMLElement>(".tb-attachment-popover .tb-attachment-close")!;
+      assertHiddenLabel(close, "Close attachments");
+    } finally { attached.cleanup(); }
+  } finally { style.remove(); }
 });
 
 test("[views][storage] rapid option and relationship reversals are evaluated against the queued saved state", async () => {

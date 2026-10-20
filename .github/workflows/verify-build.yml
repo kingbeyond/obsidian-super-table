@@ -2,8 +2,15 @@ name: Verify build and attest artifacts
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - '*.*.*'
 
 permissions: {}
+
+concurrency:
+  group: verify-build-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -17,7 +24,8 @@ jobs:
       - name: Check out selected ref
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Set up Node.js 22
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -25,8 +33,22 @@ jobs:
           node-version: 22
           package-manager-cache: false
 
+      - name: Validate version metadata and release notes
+        env:
+          IS_RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [ "$IS_RELEASE_TAG" = true ]; then
+            node scripts/check-release.mjs --tag "$RELEASE_TAG"
+          else
+            node scripts/check-release.mjs
+          fi
+
       - name: Install locked dependencies
         run: npm ci
+
+      - name: Test release checks
+        run: npm run test:release
 
       - name: Type check
         run: npm run typecheck
@@ -45,14 +67,18 @@ jobs:
         with:
           subject-path: |
             main.js
+            manifest.json
             styles.css
 
       - name: Verify build attestations
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh attestation verify main.js --repo "$GITHUB_REPOSITORY"
-          gh attestation verify styles.css --repo "$GITHUB_REPOSITORY"
+          for file in main.js manifest.json styles.css; do
+            gh attestation verify "$file" --repo "$GITHUB_REPOSITORY" \
+              --source-digest "$GITHUB_SHA" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/verify-build.yml"
+          done
 
       - name: Upload install files
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -64,3 +90,71 @@ jobs:
             styles.css
           if-no-files-found: error
           retention-days: 90
+
+  draft:
+    name: Prepare draft release for human review
+    needs: build
+    if: github.repository == 'kingbeyond/obsidian-super-table' && github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+      attestations: read
+    steps:
+      - name: Check out the same source commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Recheck release contract
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/check-release.mjs --tag "$RELEASE_TAG"
+
+      - name: Download this run's verified install files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: super-table-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-artifacts
+
+      - name: Verify downloaded assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cmp manifest.json release-artifacts/manifest.json
+          cmp styles.css release-artifacts/styles.css
+          for file in main.js manifest.json styles.css; do
+            gh attestation verify "release-artifacts/$file" --repo "$GITHUB_REPOSITORY" \
+              --source-digest "$GITHUB_SHA" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/verify-build.yml"
+          done
+
+      - name: Create draft only; never publish or replace an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq '.sha')
+          if [ "$tag_sha" != "$SOURCE_SHA" ]; then
+            echo 'Tag moved after this build. Stop and review.' >&2
+            exit 1
+          fi
+          existing=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | select(.tag_name == env.RELEASE_TAG) | .id')
+          if [ -n "$existing" ]; then
+            echo 'A release already exists for this tag. Do not replace it.' >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --draft --title "$RELEASE_TAG" \
+            --notes-file "docs/releases/$RELEASE_TAG.md" \
+            release-artifacts/main.js release-artifacts/manifest.json release-artifacts/styles.css
+          echo 'Draft prepared. Publishing requires explicit human confirmation.' >> "$GITHUB_STEP_SUMMARY"

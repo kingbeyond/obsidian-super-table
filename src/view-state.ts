@@ -9,23 +9,11 @@ function sessionViews(app: App): Map<string, string> {
   return views;
 }
 
-function hasVaultStorage(app: App): boolean {
-  return typeof app.loadLocalStorage === "function" && typeof app.saveLocalStorage === "function";
-}
-
-function legacyStorageKey(app: App, tableKey: string): string {
-  // Before Obsidian 1.8.7, scope browser storage by the adapter's root URI
-  // so same-named vaults stay separate on desktop and mobile.
-  return storagePrefix + JSON.stringify([app.vault.adapter.getResourcePath(""), tableKey]);
-}
-
 export function rememberedView(app: App, tableKey: string): string | undefined {
   const views = sessionViews(app);
   if (views.has(tableKey)) return views.get(tableKey);
   try {
-    const value: unknown = hasVaultStorage(app)
-      ? app.loadLocalStorage(storagePrefix + tableKey)
-      : window.localStorage.getItem(legacyStorageKey(app, tableKey));
+    const value: unknown = app.loadLocalStorage(storagePrefix + tableKey);
     if (typeof value === "string" && value) { views.set(tableKey, value); return value; }
   } catch { /* Unavailable local storage must not prevent opening the table. */ }
   return undefined;
@@ -36,7 +24,6 @@ export function rememberView(app: App, tableKey: string, viewId: string): void {
   if (views.get(tableKey) === viewId) return;
   views.set(tableKey, viewId);
   try {
-    if (hasVaultStorage(app)) app.saveLocalStorage(storagePrefix + tableKey, viewId);
-    else window.localStorage.setItem(legacyStorageKey(app, tableKey), viewId);
+    app.saveLocalStorage(storagePrefix + tableKey, viewId);
   } catch { /* Keep the session choice when local storage cannot be written. */ }
 }

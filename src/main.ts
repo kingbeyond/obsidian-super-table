@@ -1,5 +1,5 @@
 import { errorMessage, setLanguage, t } from "./i18n";
-import { App, getLanguage, MarkdownRenderChild, MarkdownView, Menu, Notice, Plugin, PluginSettingTab, Setting } from "obsidian";
+import { App, getLanguage, MarkdownRenderChild, MarkdownView, Menu, Notice, Plugin, PluginSettingTab } from "obsidian";
 import type { SettingDefinitionItem } from "obsidian";
 import { createDefaultTable, TableDocument } from "./model";
 import { applyMarkdownExportToNote, insertBlockAfter, readTable, readTableId, scanFencedBlocks, serializeTable, TABLE_CODE_BLOCK_LANGUAGE } from "./storage";
@@ -102,8 +102,7 @@ export default class SuperTablePlugin extends Plugin {
 
   async onload(): Promise<void> {
     let language = "en";
-    // Retain the existing language choice if a host fails to expose its public API.
-    try { language = typeof getLanguage === "function" ? getLanguage() : window.localStorage.getItem("language") || "en"; } catch { /* Default to English if settings cannot be read. */ }
+    try { language = getLanguage(); } catch { /* Default to English if settings cannot be read. */ }
     setLanguage(language);
     this.superTableSettings = normalizeSuperTableSettings(await this.loadData());
     this.manifest.description = t("Create editable data tables with typed fields, date formats, grouping, and multiple named views over shared records.");
@@ -160,7 +159,7 @@ export default class SuperTablePlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "convert-super-table-to-markdown",
+      id: "convert-to-markdown",
       name: t("Convert Super Table to Markdown"),
       editorCallback: async (editor) => {
         const block = findBlockAtCursor(editor, [TABLE_CODE_BLOCK_LANGUAGE]);
@@ -216,7 +215,6 @@ export default class SuperTablePlugin extends Plugin {
 class SuperTableSettingTab extends PluginSettingTab {
   constructor(app: App, private readonly plugin: SuperTablePlugin) { super(app, plugin); }
 
-  // New hosts use these definitions for rendering/search; older hosts retain display().
   getSettingDefinitions(): SettingDefinitionItem[] {
     return [{
       name: t("Attachment image paste location"),
@@ -241,18 +239,4 @@ class SuperTableSettingTab extends PluginSettingTab {
     await this.plugin.saveSettings();
   }
 
-  display(): void {
-    this.containerEl.replaceChildren();
-    new Setting(this.containerEl)
-      .setName(t("Attachment image paste location"))
-      .setDesc(t("Choose where images pasted into attachment cells are saved. This does not affect device imports."))
-      .addDropdown((dropdown) => dropdown
-        .addOption("obsidian", t("Use Obsidian attachment settings"))
-        .addOption("note-folder", t("Use sibling 附件/<note name>/ folder"))
-        .setValue(this.plugin.superTableSettings.attachmentImagePasteLocation)
-        .onChange(async (value) => {
-          this.plugin.superTableSettings.attachmentImagePasteLocation = value === "note-folder" ? "note-folder" : "obsidian";
-          await this.plugin.saveSettings();
-        }));
-  }
 }

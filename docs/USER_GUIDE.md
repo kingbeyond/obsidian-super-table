@@ -4,7 +4,7 @@
 
 Try the [example tables](examples/README.md) in your vault.
 
-Version 1.0.1 and later require Obsidian 1.8.7 or newer.
+Version 1.0.4 and later require Obsidian 1.13.0 or newer. Versions 1.0.1–1.0.3 retain their Obsidian 1.8.7 minimum.
 
 ## Creating and viewing tables
 
@@ -53,7 +53,7 @@ Set a column's type to **Attachments**, select a cell, and click its dropdown bu
 
 In **Settings → Community plugins → Super Table → Attachment image paste location**, choose Obsidian's attachment settings or `附件/<note name>/` beside the note. This affects pasted images only. Pasting requires image data in the clipboard; an image URL alone is not downloaded.
 
-On Obsidian 1.13.0 or newer, this option is also available through settings search. Earlier supported versions continue to use the plugin settings page.
+This option is also available through settings search.
 
 Click images to preview, browse, and zoom. Other attachments open through Obsidian.
 
@@ -156,6 +156,8 @@ Choose **Export → Export Markdown** to save a file or copy to the clipboard:
 Attachments become vault wikilinks, which may not open outside the vault.
 
 To convert within a note, place the cursor inside the Super Table block, run **Super Table: Convert Super Table to Markdown**, and confirm the preview. By default, the original stays and the result is inserted below it. Choosing **Replace original Super Table** removes field types, option definitions, and view settings.
+
+When upgrading from 1.0.3 or earlier to 1.0.4 or later, reassign any custom hotkey for this command in Obsidian's hotkey settings. External command references must use its new ID, `super-table:convert-to-markdown`.
 
 ### Exporting CSV
 
