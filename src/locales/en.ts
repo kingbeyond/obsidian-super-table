@@ -1,5 +1,13 @@
 // English messages are also the stable translation keys.
 export const en = {
+  "Search": "Search",
+  "Search current view": "Search current view",
+  "Search cells…": "Search cells…",
+  "No matches in this view": "No matches in this view",
+  "{current} / {total} cells": "{current} / {total} cells",
+  "Previous match": "Previous match",
+  "Next match": "Next match",
+  "Close search": "Close search",
   "The filter structure is unsupported.": "The filter structure is unsupported.",
   "Filter field “{id}” was not found.": "Filter field “{id}” was not found.",
   "A filter option in “{name}” was not found.": "A filter option in “{name}” was not found.",

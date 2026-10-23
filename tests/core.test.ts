@@ -1,3 +1,4 @@
+import { attachSearchState, findCells } from "../src/search";
 import { emptyFilters, FilterCondition, FilterGroup, filterRows, validFilterCondition } from "../src/filters";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -11,7 +12,7 @@ import { applyMarkdownExportToNote, scanFencedBlocks, replaceTableBlockInText, s
 import { captureRows, cellLabel, clipboardValues, linkEditorFields, parseWebLink, reconcileOptions, moveRelative, serializeWebLink, valueFromLabel } from "../src/interaction";
 import { findMarkdownTaskMarkers, needsMarkdownRendering, safeMarkdownEmbeds, setMarkdownTaskState } from "../src/markdown";
 import { markdownPreviewCache } from "../src/markdown-preview";
-import { confirmMarkdownReplacement, createExportFileName, renderTable } from "../src/renderer";
+import { confirmMarkdownReplacement, createExportFileName, renderTable, trackLivePreviewHistoryViewport } from "../src/renderer";
 import { convertSuperTableToMarkdown, createMarkdownExportFile } from "../src/markdown-export";
 import { colorLabel, errorMessage, getLocale, resolveLocale, setLanguage, t } from "../src/i18n";
 import { en } from "../src/locales/en";
@@ -20,6 +21,7 @@ import { fieldTypeLabel } from "../src/model";
 import { attachmentFileNameWithSuffix, normalizeSuperTableSettings, noteNamedAttachmentFolder, pastedImageFileName } from "../src/settings";
 import SuperTablePlugin from "../src/main";
 import { tableEditorExtension } from "../src/editor";
+import { cancelViewportRestorations, registerViewportRestoration } from "../src/viewport";
 import { promptForm } from "../src/ui";
 import { editorInfoField, editorLivePreviewField, shownMenus, notices, markdownRenderCalls, MarkdownRenderer, Menu, Platform, TFile, setObsidianLanguage, setObsidianLanguageFailure, installObsidianDomHelpers } from "./obsidian-stub";
 
@@ -1416,15 +1418,25 @@ test("[storage][table-block] live-preview save restores the CodeMirror scroll po
   state.field(field).between(0, state.doc.length, (_from: number, _to: number, decoration: any) => { widget = decoration.spec.widget; });
   const win = dom.window;
   const scrollDOM = document.createElement("div"); document.body.append(scrollDOM);
+  scrollDOM.style.overflowY = "auto";
+  Object.defineProperties(scrollDOM, { clientHeight: { value: 400 }, scrollHeight: { value: 1500 } });
   scrollDOM.scrollTop = 480; scrollDOM.scrollLeft = 67;
   const view = {
-    dom: document.createElement("div"), scrollDOM, get state() { return state; }, requestMeasure() {},
+    dom: scrollDOM, scrollDOM, get state() { return state; }, requestMeasure() {},
     dispatch(spec: any) {
       state = state.update(spec).state;
       win.requestAnimationFrame(() => { scrollDOM.scrollTop = 0; scrollDOM.scrollLeft = 0; });
     },
   };
-  const root = widget.toDOM(view); document.body.append(root);
+  const root = widget.toDOM(view); scrollDOM.append(root);
+  const prototype = dom.window.HTMLElement.prototype; const originalRect = prototype.getBoundingClientRect;
+  prototype.getBoundingClientRect = function () {
+    if (root.contains(this) || this === root) {
+      const top = 500 - scrollDOM.scrollTop;
+      return { top, bottom: top + 40, left: 0, right: 800, width: 800, height: 40, x: 0, y: top, toJSON() {} } as DOMRect;
+    }
+    return originalRect.call(this);
+  };
   try {
     await editTextCell(root, "Saved while scrolled");
     let updatedWidget: any;
@@ -1435,7 +1447,44 @@ test("[storage][table-block] live-preview save restores the CodeMirror scroll po
     assert.equal(scrollDOM.scrollTop, 480);
     assert.equal(scrollDOM.scrollLeft, 67);
     assert.equal(readTable(scanFencedBlocks(state.doc.toString())[0].body).records[0].values[table.fields[0].id], "Saved while scrolled");
-  } finally { widget.destroy(); root.remove(); scrollDOM.remove(); }
+  } finally { widget.destroy(); root.remove(); scrollDOM.remove(); prototype.getBoundingClientRect = originalRect; }
+});
+test("[storage][views][layout] editing the sort field keeps its moved cell anchored after all editor save frames", async () => {
+  const table = fixture(); delete table.views[0].group;
+  table.views[0].sort = { fieldId: table.fields[0].id, direction: "asc" };
+  table.records = Array.from({ length: 30 }, (_, index) => ({ id: `sorted-${index}`, values: { ...table.records[0].values, [table.fields[0].id]: `Item ${String(index).padStart(2, "0")}` } }));
+  const scroller = document.createElement("div"); scroller.style.overflowY = "auto";
+  Object.defineProperties(scroller, { clientHeight: { value: 600 }, scrollHeight: { value: 2500 } });
+  document.body.append(scroller); scroller.scrollTop = 120;
+  const view = { file: { path: "test.md" }, getMode: () => "source", containerEl: scroller };
+  const plugin = { app: { workspace: { getActiveViewOfType: () => view } } } as any;
+  const extension = tableEditorExtension(plugin) as any[]; const field = extension[0];
+  let state = EditorState.create({ doc: serializeTable(table), extensions: [editorInfoField, editorLivePreviewField, extension] });
+  let widget: any;
+  state.field(field).between(0, state.doc.length, (_from: number, _to: number, decoration: any) => { widget = decoration.spec.widget; });
+  const editor = { dom: scroller, scrollDOM: scroller, get state() { return state; }, requestMeasure() {},
+    dispatch(spec: any) { state = state.update(spec).state; },
+  };
+  const prototype = dom.window.HTMLElement.prototype; const previousRect = prototype.getBoundingClientRect;
+  let root: HTMLElement;
+  prototype.getBoundingClientRect = function () {
+    const rect = (top: number, height: number) => ({ top, bottom: top + height, left: 0, right: 800, width: 800, height, x: 0, y: top, toJSON() {} }) as DOMRect;
+    if (this === scroller) return rect(0, 600);
+    if (root && (this === root || root.contains(this))) {
+      const row = this.closest("tr.tb-data-row"); const index = row ? [...root.querySelectorAll("tr.tb-data-row")].indexOf(row) : 0;
+      return rect(140 + index * 40 - scroller.scrollTop, 40);
+    }
+    return previousRect.call(this);
+  };
+  try {
+    root = widget.toDOM(editor); scroller.append(root);
+    await editTextCell(root, "ZZZ sorted last");
+    for (let i = 0; i < 4; i++) await new Promise<void>((resolve) => dom.window.requestAnimationFrame(() => resolve()));
+    assert.equal(scroller.scrollTop, 1280, "the editor offset fallback must not undo the moved cell anchor");
+    root.querySelector("td.tb-cell")!.append(document.createTextNode("late rendering"));
+    for (let i = 0; i < 3; i++) await new Promise<void>((resolve) => dom.window.requestAnimationFrame(() => resolve()));
+    assert.equal(scroller.scrollTop, 1280);
+  } finally { widget.destroy(); scroller.remove(); prototype.getBoundingClientRect = previousRect; }
 });
 function mount(table = fixture(), preserveView = false, parent: HTMLElement = document.body,
   app: any = { workspace: { getActiveViewOfType: () => undefined } }) {
@@ -2069,7 +2118,7 @@ test("[layout] renderer has compact icon toolbar, type icons, plain pills and se
     const labelId = button.getAttribute("aria-labelledby");
     return !!labelId && !!document.getElementById(labelId)?.textContent?.trim();
   }), "toolbar buttons should retain accessible names through their visible labels");
-  assert.deepEqual([...ui.root.querySelectorAll(".tb-toolbar button:not(.tb-view-menu-button) span:not(:has(svg))")].map((element) => element.textContent), ["Display configuration", "Row", "Column", "Filter", "Group", "Export", "Select"]);
+  assert.deepEqual([...ui.root.querySelectorAll(".tb-toolbar button:not(.tb-view-menu-button) span:not(:has(svg))")].map((element) => element.textContent), ["Display configuration", "Row", "Column", "Filter", "Group", "Search", "Export", "Select"]);
   assert.equal(ui.root.querySelectorAll(".tb-type-icon").length, 3);
   assert.equal(ui.root.querySelector(".tb-type-icon svg")?.getAttribute("data-icon"), "text");
   assert.equal(ui.root.querySelectorAll(".tb-tags .tb-tag").length, 4);
@@ -2474,7 +2523,7 @@ test("[records][layout] toolbar add row scrolls the saved row into view when it 
     assert.equal(calls[0].rowId, added.id);
     assert.equal(calls[0].options?.block, "center");
     assert.equal(calls[0].options?.inline, "nearest");
-    assert.equal(calls[0].options?.behavior, "smooth");
+    assert.equal(calls[0].options?.behavior, "instant");
   } finally {
     if (previous) Object.defineProperty(prototype, "scrollIntoView", previous);
     else delete (prototype as HTMLElement & { scrollIntoView?: (options?: ScrollIntoViewOptions) => void }).scrollIntoView;
@@ -2483,6 +2532,88 @@ test("[records][layout] toolbar add row scrolls the saved row into view when it 
     ui.cleanup();
   }
 });
+for (const mode of ["live-preview", "reading"] as const) for (const direction of ["asc", "desc"] as const) {
+  test(`[records][views][storage] ${mode} ${direction} add row stays visible after save restoration and delayed rendering`, async () => {
+    const table = fixture(); delete table.views[0].group;
+    table.views[0].sort = { fieldId: table.fields[0].id, direction };
+    table.records = Array.from({ length: 40 }, (_, index) => ({
+      id: `row-${index}`, values: { ...table.records[0].values, [table.fields[0].id]: `Item ${String(index).padStart(2, "0")}` },
+    }));
+    const scroller = document.createElement("div"); scroller.style.overflowY = "auto";
+    Object.defineProperties(scroller, {
+      clientHeight: { configurable: true, value: 600 }, scrollHeight: { configurable: true, value: 3000 },
+    });
+    scroller.scrollTop = 120; document.body.append(scroller);
+    const rect = (top: number, height = 40) => ({ top, bottom: top + height, left: 0, right: 800, width: 800, height, x: 0, y: top, toJSON() {} }) as DOMRect;
+    const originalRect = dom.window.HTMLElement.prototype.getBoundingClientRect;
+    const prototype = dom.window.HTMLElement.prototype;
+    const originalScroll = Object.getOwnPropertyDescriptor(prototype, "scrollIntoView");
+    let root: HTMLElement | null = null;
+    let revealedTop: number | undefined;
+    let revealedRowId: string | undefined;
+    const rowTop = (row: HTMLElement) => 140 + [...root!.querySelectorAll("tr.tb-data-row")].indexOf(row) * 40;
+    prototype.getBoundingClientRect = function () {
+      if (this === scroller) return rect(0, 600);
+      if (root && (this === root || root.contains(this))) {
+        const row = this.closest<HTMLElement>("tr.tb-data-row");
+        return rect((row ? rowTop(row) : 100) - scroller.scrollTop);
+      }
+      return originalRect.call(this);
+    };
+    Object.defineProperty(prototype, "scrollIntoView", { configurable: true, value(this: HTMLElement) {
+      if (!this.matches("tr.tb-data-row")) return;
+      revealedRowId = this.dataset.rowId;
+      revealedTop = rowTop(this) - 280;
+      scroller.scrollTop = revealedTop;
+    } });
+    let note = serializeTable(table);
+    const noteView = { file: { path: "test.md" }, getMode: () => mode === "reading" ? "preview" : "source", containerEl: scroller };
+    const plugin = { app: {
+      workspace: { getActiveViewOfType: () => noteView },
+      vault: { getAbstractFileByPath: () => new TFile("test.md"), process: async (_file: unknown, update: (text: string) => string) => {
+        note = update(note);
+        // Reading View rebuilds its code block after the Vault write.
+        cleanup();
+        const replacement = document.createElement("div"); root!.replaceWith(replacement); root = replacement;
+        const controller = renderTable(plugin, scanFencedBlocks(note)[0].body, { root, sourcePath: "test.md" });
+        cleanup = () => controller.destroy();
+      } },
+    } } as any;
+    let cleanup = () => {};
+    try {
+      if (mode === "live-preview") {
+        const extension = tableEditorExtension(plugin) as any[]; const field = extension[0];
+        let state = EditorState.create({ doc: note, extensions: [editorInfoField, editorLivePreviewField, extension] });
+        let widget: any;
+        state.field(field).between(0, state.doc.length, (_from: number, _to: number, decoration: any) => { widget = decoration.spec.widget; });
+        const editor = { dom: scroller, scrollDOM: scroller, get state() { return state; }, requestMeasure() {},
+          dispatch(spec: any) { state = state.update(spec).state; },
+        };
+        root = widget.toDOM(editor); cleanup = () => widget.destroy();
+      } else {
+        root = document.createElement("div");
+        const controller = renderTable(plugin, serializeTableBody(table), { root, sourcePath: "test.md" });
+        cleanup = () => controller.destroy();
+      }
+      scroller.append(root!);
+      click(byLabel(root!, "Row"));
+      await waitForCondition(() => revealedTop !== undefined, "new row navigation");
+      assert.ok(!table.records.some((row) => row.id === revealedRowId), "navigation targets the newly created row");
+      for (let frame = 0; frame < 3; frame++) await new Promise<void>((resolve) => dom.window.requestAnimationFrame(() => resolve()));
+      assert.equal(scroller.scrollTop, revealedTop, "save callbacks must not restore the old offset after new row navigation");
+      root!.querySelector("td.tb-cell")!.append(document.createTextNode("late Markdown render"));
+      for (let frame = 0; frame < 3; frame++) await new Promise<void>((resolve) => dom.window.requestAnimationFrame(() => resolve()));
+      assert.equal(scroller.scrollTop, revealedTop, "late content rendering must not pull the viewport back to the old anchor");
+      const added = [...root!.querySelectorAll<HTMLTableRowElement>("tr.tb-data-row")].find((row) => row.dataset.rowId === revealedRowId)!;
+      assert.ok(added.getBoundingClientRect().top >= 0 && added.getBoundingClientRect().bottom <= 600);
+    } finally {
+      document.body.dispatchEvent(new dom.window.Event("pointerdown", { bubbles: true }));
+      cleanup(); scroller.remove(); prototype.getBoundingClientRect = originalRect;
+      if (originalScroll) Object.defineProperty(prototype, "scrollIntoView", originalScroll);
+      else delete (prototype as HTMLElement & { scrollIntoView?: () => void }).scrollIntoView;
+    }
+  });
+}
 test("[records] right-click row insertion does not scroll when the inserted row is already visible", async () => {
   const ui = mount();
   const prototype = HTMLElement.prototype as HTMLElement & { scrollIntoView?: (options?: ScrollIntoViewOptions) => void };
@@ -4485,6 +4616,34 @@ test("[interaction] Markdown text cells select on the first pointer click and ed
     assert.equal(ui.saved(), null, "cancelling the test edit must not save");
   } finally { ui.cleanup(); }
 });
+test("[interaction][markdown] text selection released on the cell edge keeps the editor and selection", async () => {
+  for (const endpoint of ["cell", "wrapper", "editor", "outside"] as const) for (const direction of ["backward", "forward"] as const) {
+    const ui = mount();
+    try {
+      const cell = ui.root.querySelector<HTMLTableCellElement>("td.tb-cell")!;
+      const input = openMarkdownEditor(cell);
+      input.value = "Select this draft text";
+      input.dispatchEvent(new dom.window.Event("pointerdown", { bubbles: true }));
+      input.setSelectionRange(0, 11, direction);
+      const releaseTarget = endpoint === "cell" ? cell : endpoint === "wrapper" ? input.parentElement! : endpoint === "outside" ? ui.root : input;
+      releaseTarget.dispatchEvent(new dom.window.MouseEvent("mouseup", { bubbles: true }));
+      const releasedClick = new dom.window.MouseEvent("click", { bubbles: true, cancelable: true });
+      releaseTarget.dispatchEvent(releasedClick);
+      await settle();
+      assert.equal(document.activeElement, input, `${endpoint}/${direction}: selection must not focus the outer cell`);
+      assert.equal(input.isConnected, true);
+      assert.equal(cell.classList.contains("is-cell-editing"), true);
+      assert.deepEqual([input.selectionStart, input.selectionEnd, input.selectionDirection], [0, 11, direction]);
+      assert.equal(ui.saved(), null, "selecting draft text must not save it");
+      if (endpoint === "editor") assert.equal(releasedClick.defaultPrevented, false, "normal input clicks keep their native behavior");
+
+      pointerClick(cell);
+      await settle();
+      assert.equal(input.isConnected, false, "a new press on the cell edge still leaves editing");
+      assert.equal(ui.saved()?.records[0].values[ui.table.fields[0].id], "Select this draft text");
+    } finally { ui.cleanup(); }
+  }
+});
 test("[interaction] number cells select on the first click and enter edit on the second", async () => {
   const table = fixture(); const field: Field = { id: "quantity", name: "数量", type: "number" };
   table.fields.push(field); table.records[0].values[field.id] = 4;
@@ -5718,7 +5877,7 @@ test("[localization] Chinese renderer translates toolbar, menus, option colors a
   setLanguage("zh-CN"); const ui = mount();
   try {
     const labels = [...ui.root.querySelectorAll(".tb-toolbar button:not(.tb-view-menu-button) span:not(:has(svg))")].map((element) => element.textContent || "");
-    assert.deepEqual(labels.filter((label) => !/^粘贴 \d+ 行$/.test(label)), ["显示配置", "新增行", "新增列", "筛选", "分组", "导出", "选择"]);
+    assert.deepEqual(labels.filter((label) => !/^粘贴 \d+ 行$/.test(label)), ["显示配置", "新增行", "新增列", "筛选", "分组", "搜索", "导出", "选择"]);
     assert.equal(ui.root.querySelector<HTMLTextAreaElement>(".tb-field-name")!.value, "名称");
     assert.equal(ui.root.querySelector(".tb-choice-label")!.textContent, "PC");
     click(byLabel(ui.root, "导出"));
@@ -6540,4 +6699,337 @@ test("[data-format] malformed typed filter operands are rejected before tables b
     const table = { schemaVersion: 1, tableId: "invalid-condition", fields: [field], records: [], views: [{ id: "all", name: "All", filters: { mode: "and", conditions: [{ id: "rule", fieldId: "f", ...condition }] } }], defaultViewId: "all" };
     const source = JSON.stringify(table); assert.throws(() => readTable(source), /filters.conditions\[0\]/); assert.equal(JSON.stringify(table), source);
   }
+});
+
+function searchTable(root: HTMLElement, query: string): HTMLInputElement {
+  if (!root.querySelector('.tb-search-input')) click(root.querySelector('.tb-search-toggle')!);
+  const input = root.querySelector<HTMLInputElement>('.tb-search-input')!;
+  input.focus(); input.value = query;
+  input.dispatchEvent(new dom.window.InputEvent('input', { bubbles: true }));
+  return root.querySelector<HTMLInputElement>('.tb-search-input')!;
+}
+
+test("[layout][search] viewport takeover survives controller replacement and stays isolated between note panes", () => {
+  const firstPane = document.createElement("div"); const secondPane = document.createElement("div");
+  document.body.append(firstPane, secondPane);
+  const oldRoot = document.createElement("div"); firstPane.append(oldRoot);
+  const calls: string[] = [];
+  const releaseFirst = registerViewportRestoration(firstPane, "save", () => { calls.push("first"); releaseFirst(); });
+  const releaseSecond = registerViewportRestoration(secondPane, "history", () => { calls.push("second"); releaseSecond(); });
+  try {
+    const replacement = document.createElement("div"); oldRoot.replaceWith(replacement);
+    cancelViewportRestorations(replacement);
+    assert.deepEqual(calls, ["first"]);
+    cancelViewportRestorations(replacement); assert.deepEqual(calls, ["first"], "cancelled tasks unregister themselves");
+    cancelViewportRestorations(secondPane); assert.deepEqual(calls, ["first", "second"]);
+  } finally { releaseFirst(); releaseSecond(); firstPane.remove(); secondPane.remove(); }
+});
+
+for (const mode of ["live-preview", "reading"] as const) for (const operation of ["save", "undo", "redo", "native-undo", "native-redo"] as const) {
+  if (mode === "reading" && operation.startsWith("native")) continue;
+  test(`[search][storage][layout] ${mode} search takes over pending ${operation} restoration across controller replacement`, async () => {
+    const table = fixture(); delete table.views[0].sort; delete table.views[0].group;
+    table.records = Array.from({ length: 40 }, (_, index) => ({
+      id: `row-${index}`, values: { ...table.records[0].values, [table.fields[0].id]: index === 39 ? "search target" : `Item ${index}` },
+    }));
+    const path = `${mode}-${operation}.md`;
+    const scroller = document.createElement("div"); scroller.style.overflowY = "auto"; scroller.style.overflowX = "auto";
+    Object.defineProperties(scroller, {
+      clientHeight: { value: 600 }, scrollHeight: { value: 3000 }, clientWidth: { value: 800 }, scrollWidth: { value: 2000 },
+    });
+    scroller.scrollTop = 120; scroller.scrollLeft = 30; document.body.append(scroller);
+    const prototype = dom.window.HTMLElement.prototype;
+    const originalRect = prototype.getBoundingClientRect;
+    const originalScroll = Object.getOwnPropertyDescriptor(prototype, "scrollIntoView");
+    const rect = (top: number, height = 40) => ({ top, bottom: top + height, left: 0, right: 800, width: 800, height, x: 0, y: top, toJSON() {} }) as DOMRect;
+    let root: HTMLElement;
+    let layoutShift = 0;
+    prototype.getBoundingClientRect = function () {
+      if (this === scroller) return rect(0, 600);
+      if (root && (this === root || root.contains(this))) {
+        const row = this.closest<HTMLElement>("tr.tb-data-row");
+        const index = row ? [...root.querySelectorAll("tr.tb-data-row")].indexOf(row) : -1;
+        return rect(140 + Math.max(index, 0) * 40 + layoutShift - scroller.scrollTop);
+      }
+      return originalRect.call(this);
+    };
+    let revealCount = 0;
+    Object.defineProperty(prototype, "scrollIntoView", { configurable: true, value(this: HTMLElement) {
+      if (!this.matches(".is-search-current")) return;
+      revealCount++; scroller.scrollTop = 1360 + layoutShift; scroller.scrollLeft = 250;
+      scroller.dispatchEvent(new dom.window.Event("scroll"));
+    } });
+    const original = serializeTable(table);
+    let note = original;
+    let edited = "";
+    let cleanup = () => {};
+    let tracker: ReturnType<typeof trackLivePreviewHistoryViewport> | undefined;
+    let applyHistory: (text: string) => void;
+    const noteView = { file: { path }, getMode: () => mode === "reading" ? "preview" : "source", containerEl: scroller,
+      editor: { undo: () => applyHistory(original), redo: () => applyHistory(edited) } };
+    const plugin = { app: {
+      workspace: { getActiveViewOfType: () => noteView },
+      vault: { getAbstractFileByPath: () => new TFile(path), process: async (_file: unknown, update: (text: string) => string) => {
+        note = update(note); replaceReadingRoot();
+      } },
+    } } as any;
+    const replaceReadingRoot = () => {
+      const replacement = document.createElement("div");
+      if (root) { cleanup(); root.replaceWith(replacement); } else scroller.append(replacement);
+      root = replacement;
+      const controller = renderTable(plugin, scanFencedBlocks(note)[0].body, { root, sourcePath: path });
+      cleanup = () => controller.destroy();
+    };
+    const frames = async () => { for (let i = 0; i < 3; i++) await new Promise<void>((resolve) => dom.window.requestAnimationFrame(() => resolve())); };
+    try {
+      if (mode === "live-preview") {
+        const extension = tableEditorExtension(plugin) as any[]; const field = extension[0];
+        let state = EditorState.create({ doc: note, extensions: [editorInfoField.init(() => ({ file: { path } })), editorLivePreviewField, extension] });
+        const editor = { dom: scroller, scrollDOM: scroller, get state() { return state; }, requestMeasure() {},
+          dispatch(spec: any) { const before = state.doc.toString(); state = state.update(spec).state; note = state.doc.toString(); tracker?.onDocumentChange(before, note, path, true); },
+        };
+        const mountWidget = () => {
+          let widget: any;
+          state.field(field).between(0, state.doc.length, (_from: number, _to: number, decoration: any) => { widget = decoration.spec.widget; });
+          const replacement = widget.toDOM(editor);
+          if (root) { cleanup(); root.replaceWith(replacement); } else scroller.append(replacement);
+          root = replacement; cleanup = () => widget.destroy();
+        };
+        mountWidget();
+        tracker = trackLivePreviewHistoryViewport(plugin.app, path, editor as any);
+        applyHistory = (text) => {
+          const before = note; state = state.update({ changes: { from: 0, to: state.doc.length, insert: text } }).state;
+          note = text; mountWidget(); tracker!.onDocumentChange(before, text, path, true);
+        };
+      } else {
+        replaceReadingRoot();
+        const hiddenSource = document.createElement("div"); hiddenSource.className = "markdown-source-view";
+        hiddenSource.style.display = "none"; hiddenSource.append(root!.cloneNode(true)); scroller.prepend(hiddenSource);
+      }
+      await editTextCell(root!, "edited first row"); edited = note;
+      assert.notEqual(edited, original, "the edit must actually save before checking navigation");
+      if (operation !== "save") {
+        await frames();
+        const history = async (redo: boolean) => {
+          if (operation.startsWith("native")) applyHistory(redo ? edited : original);
+          else {
+            const cell = root!.querySelector<HTMLTableCellElement>("td.tb-cell")!; pointerClick(cell);
+            cell.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "z", metaKey: true, shiftKey: redo, bubbles: true, cancelable: true }));
+          }
+          await waitForCondition(() => note === (redo ? edited : original), "history applies the expected document");
+        };
+        await history(false);
+        if (operation.endsWith("redo")) await history(true);
+      }
+      await frames();
+      assert.equal(scroller.scrollTop, 120, "editing and history preserve the viewport before explicit navigation");
+      assert.equal(scroller.scrollLeft, 30);
+      layoutShift = 80;
+      root!.querySelector("td.tb-cell")!.append(document.createTextNode("changed row height"));
+      await frames();
+      assert.equal(scroller.scrollTop, operation.startsWith("native") ? 120 : 200,
+        "focused editing/history follows its cell anchor; native history keeps the note offset");
+      // Keyboard activation and typing do not emit pointerdown, unlike a mouse search.
+      const input = searchTable(root!, "search target");
+      await frames();
+      assert.ok(revealCount > 0);
+      assert.equal(scroller.scrollTop, 1440, "pending save/history must not override explicit search navigation");
+      assert.equal(scroller.scrollLeft, 250, "horizontal navigation must also take over restoration");
+      root!.querySelector("td.tb-cell")!.append(document.createTextNode("late Markdown render"));
+      await frames();
+      assert.equal(scroller.scrollTop, 1440, "late rendering must not reactivate the old anchor");
+      assert.equal(scroller.scrollLeft, 250);
+      assert.equal(document.activeElement, input);
+      assert.equal(note, operation.endsWith("undo") ? original : edited, "search must not write to the note");
+      layoutShift += 300;
+      root!.querySelector("td.tb-cell")!.append(document.createTextNode("late Markdown height increase"));
+      await frames();
+      assert.equal(scroller.scrollTop, 1740, "search follows its target after lazy Markdown changes row heights");
+      scroller.dispatchEvent(new dom.window.Event("wheel", { bubbles: true }));
+      scroller.scrollTop = 1800; layoutShift += 100;
+      root!.querySelector("td.tb-cell")!.append(document.createTextNode("render after user scrolling"));
+      await frames();
+      assert.equal(scroller.scrollTop, 1800, "user scrolling cancels search layout following");
+    } finally {
+      document.body.dispatchEvent(new dom.window.Event("pointerdown", { bubbles: true }));
+      tracker?.destroy(); cleanup(); scroller.remove(); prototype.getBoundingClientRect = originalRect;
+      if (originalScroll) Object.defineProperty(prototype, "scrollIntoView", originalScroll);
+      else delete (prototype as HTMLElement & { scrollIntoView?: () => void }).scrollIntoView;
+    }
+  });
+}
+
+test('[search] matching uses labels, raw text, paths, numbers and displayed or stored dates once per cell', () => {
+  const fields: Field[] = [
+    { id: 'text', name: 'Hidden field name', type: 'text' },
+    { id: 'choice', name: 'Choice', type: 'select', options: [{ id: 'opaque-option', label: '待处理', color: 'gray' }] },
+    { id: 'multi', name: 'Multi', type: 'multiselect', options: [{ id: 'opaque-multi', label: 'Apple', color: 'gray' }] },
+    { id: 'date', name: 'Date', type: 'date', dateFormat: 'month-day' },
+    { id: 'number', name: 'Number', type: 'number' },
+    { id: 'files', name: 'Files', type: 'attachment' },
+    { id: 'link', name: 'Link', type: 'link' },
+    { id: 'checked', name: 'Checked', type: 'checkbox' },
+  ];
+  const rows = [{ id: 'opaque-row', values: {
+    text: '**Apple** Apple 中文', choice: 'opaque-option', multi: ['opaque-multi'], date: '2026-10-20',
+    number: 0, files: ['Assets/Report.pdf'], link: '[Home](https://example.com)', checked: true,
+  } }];
+  const found = (query: string) => findCells(rows, fields, query).map((cell) => cell.fieldId);
+  assert.deepEqual(found('APPLE'), ['text', 'multi']);
+  assert.deepEqual(found('中文'), ['text']); assert.deepEqual(found('待处理'), ['choice']);
+  assert.deepEqual(found('2026'), ['date']); assert.deepEqual(found('10-20'), ['date']);
+  assert.ok(found('0').includes('number')); assert.deepEqual(found('report.PDF'), ['files']);
+  assert.deepEqual(found('example.com'), ['link']); assert.deepEqual(found('Home'), ['link']);
+  assert.deepEqual(found('opaque'), []); assert.deepEqual(found('Hidden field name'), []);
+  assert.deepEqual(found('true'), []); assert.deepEqual(found(''), []);
+});
+
+test('[search][views] search excludes filtered rows and hidden fields and leaves the grid and document intact', async () => {
+  const table = fixture(); const [name, platform] = table.fields;
+  table.views[0].filters = filtersFor(name.id, 'Win');
+  table.views[0].visibleFieldIds = [name.id];
+  const ui = mount(table);
+  try {
+    click(ui.root.querySelector('.tb-search-toggle')!);
+    const grid = ui.root.querySelector('.tb-grid'); const rowCount = ui.root.querySelectorAll('.tb-data-row').length;
+    searchTable(ui.root, 'Win');
+    assert.equal(ui.root.querySelectorAll('.is-search-match').length, 1);
+    assert.equal(ui.root.querySelector('.tb-search-status')?.textContent, '1 / 1 cells');
+    assert.equal(ui.root.querySelector('.tb-grid'), grid, 'typing does not rebuild the grid');
+    assert.equal(ui.root.querySelectorAll('.tb-data-row').length, rowCount, 'search does not filter rows');
+    searchTable(ui.root, 'IINA'); assert.equal(ui.root.querySelectorAll('.is-search-match').length, 0);
+    searchTable(ui.root, platform.options![0].label); assert.equal(ui.root.querySelectorAll('.is-search-match').length, 0);
+    assert.equal(ui.root.querySelector('.tb-search-status')?.textContent, 'No matches in this view');
+    await settle(); assert.equal(ui.saved(), null, 'opening, searching and navigating never saves');
+    click(ui.root.querySelector('.tb-search-close')!);
+    assert.equal(ui.root.querySelector('.tb-search-bar'), null);
+    assert.equal(document.activeElement, ui.root.querySelector('.tb-search-toggle'));
+  } finally { ui.cleanup(); }
+});
+
+test('[search][interaction] navigation follows displayed rows and columns, wraps, scrolls and preserves query focus', async () => {
+  const table = fixture(); table.records.forEach((row) => { row.values[table.fields[0].id] = 'find find'; });
+  table.fields.push({ id: 'more', name: 'More', type: 'text' });
+  table.records.forEach((row) => { row.values.more = 'FIND'; });
+  table.views[0].sort = { fieldId: table.fields[1].id, direction: 'asc' };
+  delete table.views[0].group;
+  const ui = mount(table, true);
+  const prototype = HTMLElement.prototype;
+  const descriptor = Object.getOwnPropertyDescriptor(prototype, 'scrollIntoView');
+  const scrolled: Array<{ cell: HTMLElement; options: ScrollIntoViewOptions }> = [];
+  Object.defineProperty(prototype, 'scrollIntoView', { configurable: true, value(this: HTMLElement, options: ScrollIntoViewOptions) { scrolled.push({ cell: this, options }); } });
+  try {
+    const input = searchTable(ui.root, 'find');
+    const expected = filterAndSortRows(table, table.views[0]).flatMap((row) => [table.fields[0].id, 'more'].map((fieldId) => [row.id, fieldId]));
+    const current = () => { const cell = ui.root.querySelector<HTMLElement>('.is-search-current')!; return [cell.parentElement!.dataset.rowId, cell.dataset.fieldId]; };
+    assert.deepEqual(current(), expected[0]); assert.equal(ui.root.querySelector('.tb-search-status')?.textContent, '1 / 4 cells');
+    for (let i = 1; i <= 4; i++) {
+      input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      assert.deepEqual(current(), expected[i % 4]);
+    }
+    input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true }));
+    assert.deepEqual(current(), expected[3]); assert.equal(document.activeElement, input);
+    const nativeFind = new dom.window.KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true });
+    input.dispatchEvent(nativeFind); assert.equal(nativeFind.defaultPrevented, false);
+    await settle(); assert.equal(scrolled.at(-1)?.cell.dataset.fieldId, 'more');
+    assert.equal(scrolled.at(-1)?.options.inline, 'nearest');
+    assert.match(scrolled.at(-1)!.cell.style.scrollMarginTop, /px$/);
+    input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    assert.equal(ui.root.querySelector('.is-search-current'), null);
+  } finally {
+    ui.cleanup(); if (descriptor) Object.defineProperty(prototype, 'scrollIntoView', descriptor);
+    else delete (prototype as any).scrollIntoView;
+  }
+});
+
+test('[search][views] folded groups participate in search and temporary expansion restores on close', () => {
+  const table = fixture(); const view = table.views[0];
+  delete view.sort; view.group = { fieldId: table.fields[1].id, direction: 'asc' };
+  const ui = mount(table, true);
+  try {
+    [...ui.root.querySelectorAll('.tb-group-row')].forEach((line) => click(line));
+    assert.equal(ui.root.querySelectorAll('.tb-data-row').length, 0);
+    const input = searchTable(ui.root, 'IINA');
+    assert.equal(input.value, 'IINA'); assert.equal(document.activeElement, input);
+    assert.equal(ui.root.querySelector('.is-search-current')?.parentElement?.getAttribute('data-row-id'), table.records[1].id);
+    assert.equal(ui.root.querySelectorAll('.tb-data-row').length, 1);
+    click(ui.root.querySelector('.tb-search-close')!);
+    assert.equal(ui.root.querySelectorAll('.tb-data-row').length, 0);
+    [...ui.root.querySelectorAll('.tb-group-row')].forEach((line) => click(line));
+  } finally { ui.cleanup(); }
+});
+
+test('[search][views] switching views clears the query and temporary highlights', () => {
+  const table = fixture(); table.views.push({ id: 'another', name: 'Another', filters: emptyFilters() });
+  const ui = mount(table);
+  try {
+    searchTable(ui.root, 'Win'); click(ui.root.querySelector('.tb-view-menu-button')!);
+    shownMenus.at(-1)!.items.find((item) => item.title === 'Another')!.action!({});
+    assert.equal(ui.root.querySelector<HTMLInputElement>('.tb-search-input')?.value, '');
+    assert.equal(ui.root.querySelector('.is-search-match'), null);
+  } finally { ui.cleanup(); }
+});
+
+test('[search][interaction] IME composition does not navigate or rebuild until composition ends', () => {
+  const ui = mount();
+  try {
+    const input = searchTable(ui.root, 'Win'); const current = ui.root.querySelector('.is-search-current');
+    input.value = 'IINA'; input.dispatchEvent(new dom.window.InputEvent('input', { bubbles: true, isComposing: true }));
+    input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, isComposing: true }));
+    assert.equal(ui.root.querySelector('.is-search-current'), current);
+    input.dispatchEvent(new dom.window.CompositionEvent('compositionend', { bubbles: true }));
+    assert.equal(ui.root.querySelector('.is-search-current')?.parentElement?.getAttribute('data-row-id'), ui.table.records[1].id);
+  } finally { ui.cleanup(); }
+});
+
+test('[search][storage] editing a matching cell refreshes results without persisting search state', async () => {
+  const ui = mount();
+  try {
+    searchTable(ui.root, 'Win');
+    const cell = ui.root.querySelector<HTMLElement>('.is-search-current')!;
+    cell.focus(); cell.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    const editor = cell.querySelector<HTMLTextAreaElement>('textarea')!;
+    editor.value = 'Different'; editor.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await waitForCondition(() => !!ui.saved(), 'edit saved');
+    assert.equal(ui.root.querySelector('.is-search-match'), null);
+    assert.equal(ui.root.querySelector('.tb-search-status')?.textContent, 'No matches in this view');
+    assert.equal(ui.root.querySelector<HTMLInputElement>('.tb-search-input')?.value, 'Win');
+    assert.deepEqual(Object.keys(ui.saved()!).sort(), Object.keys(ui.table).sort());
+  } finally { ui.cleanup(); }
+});
+
+test('[search][storage] host replacement keeps the query, current cell and selection in its pane', () => {
+  const table = fixture(); const pane = document.createElement('div'); pane.className = 'markdown-preview-view'; document.body.append(pane);
+  const plugin = { app: {} } as any;
+  const first = document.createElement('div'); pane.append(first);
+  const firstController = renderTable(plugin, JSON.stringify(table), { root: first, sourcePath: 'search-rebuild.md', save: async (_, next) => JSON.stringify(next) });
+  let secondController: ReturnType<typeof renderTable> | undefined;
+  try {
+    const input = searchTable(first, 'Win'); input.setSelectionRange(1, 2);
+    firstController.destroy(); first.remove();
+    const second = document.createElement('div'); pane.append(second);
+    secondController = renderTable(plugin, JSON.stringify(table), { root: second, sourcePath: 'search-rebuild.md', save: async (_, next) => JSON.stringify(next) });
+    const restored = second.querySelector<HTMLInputElement>('.tb-search-input')!;
+    assert.equal(restored.value, 'Win'); assert.equal(document.activeElement, restored);
+    assert.equal(restored.selectionStart, 1); assert.equal(restored.selectionEnd, 2);
+    assert.equal(second.querySelector('.tb-search-status')?.textContent, '1 / 1 cells');
+  } finally { firstController.destroy(); secondController?.destroy(); pane.remove(); }
+});
+
+test('[search] sessions are isolated by plugin, pane and table and expire after unmount', async () => {
+  const plugin = {}; const pane = document.createElement('div'); pane.className = 'cm-editor';
+  const root = document.createElement('div'); pane.append(root);
+  const first = attachSearchState(plugin, root, 'one', 'view'); first.state.query = 'private query';
+  assert.notEqual(attachSearchState({}, root, 'one', 'view').state, first.state);
+  assert.notEqual(attachSearchState(plugin, root, 'two', 'view').state, first.state);
+  const otherPane = document.createElement('div'); otherPane.className = 'cm-editor';
+  const other = document.createElement('div'); otherPane.append(other);
+  assert.notEqual(attachSearchState(plugin, other, 'one', 'view').state, first.state);
+  first.detach(); const replacement = attachSearchState(plugin, root, 'one', 'view');
+  await new Promise((resolve) => setTimeout(resolve, 280));
+  const rebound = attachSearchState(plugin, root, 'one', 'view');
+  assert.equal(rebound.state, first.state, 'an old controller cannot delete its replacement session');
+  replacement.detach(); rebound.detach();
+  await new Promise((resolve) => setTimeout(resolve, 280));
+  assert.equal(attachSearchState(plugin, root, 'one', 'view').state.query, '');
 });

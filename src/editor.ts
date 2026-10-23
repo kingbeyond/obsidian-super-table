@@ -39,31 +39,14 @@ class TableWidget extends WidgetType {
         const markdownView = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
         if (markdownView?.file?.path !== this.path) throw new Error(t("The source note is no longer available."));
         this.body = json;
-        const scrollElement = view.scrollDOM;
-        const scrollTop = scrollElement.scrollTop;
-        const scrollLeft = scrollElement.scrollLeft;
-        const win = view.dom.ownerDocument.defaultView;
-        const restoreEditorScroll = () => {
-          if (!scrollElement.isConnected) return;
-          if (Math.abs(scrollElement.scrollTop - scrollTop) > 1) scrollElement.scrollTop = scrollTop;
-          if (Math.abs(scrollElement.scrollLeft - scrollLeft) > 1) scrollElement.scrollLeft = scrollLeft;
-        };
         try {
-          // Save through CodeMirror's history while retaining its own scroll viewport.
+          // The renderer owns viewport preservation across this transaction and
+          // layout. Restoring the raw editor offset here would override its cell anchor.
           view.dispatch({
             changes: { from: fromLine.to, to: toLine.from, insert },
             scrollIntoView: false,
             annotations: tableCellSave.of({ path: this.path, tableId: this.id }),
           });
-          restoreEditorScroll();
-          // Obsidian may adjust the Live Preview scroll position after the transaction
-          // finishes laying out the replaced fenced block.
-          if (win) {
-            win.requestAnimationFrame(() => {
-              restoreEditorScroll();
-              win.requestAnimationFrame(restoreEditorScroll);
-            });
-          }
         } catch (error) {
           this.body = previousBody;
           throw error;

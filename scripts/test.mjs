@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-const features = ["table-block", "data-format", "fields", "records", "views", "interaction", "markdown", "attachments", "import-export", "storage", "layout", "localization"];
+const features = ["table-block", "data-format", "fields", "records", "views", "search", "interaction", "markdown", "attachments", "import-export", "storage", "layout", "localization"];
 const args = process.argv.slice(2);
 const testArgs = [];
 const requestedFeatures = [];

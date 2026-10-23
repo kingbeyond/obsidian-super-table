@@ -9,6 +9,7 @@ Super Table adds editable data tables to your Obsidian notes, with typed fields,
 ## Features
 
 - **Filtering, sorting, and grouping**: Combine conditions with AND/OR, sort by field, and organize records into collapsible groups.
+- **Search within a table**: Find cells in the current view, highlight matches, and navigate between them, including cells in collapsed groups.
 - **Multiple named views**: Save different filter, sort, and grouping configurations for the same records, and switch between them as needed.
 - **Common field types**: Text, links, numbers, dates, checkboxes, single select, multi-select, and attachments.
 - **Markdown and attachments**: Format text, use lists and internal links, and toggle tasks. Attach files in a dedicated column with image previews.

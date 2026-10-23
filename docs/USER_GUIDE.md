@@ -110,6 +110,16 @@ Each view saves its own filters, sorting, grouping, and hidden fields. Views sha
 
 The plugin remembers the last view on this device. View settings sync with the note; the last-view choice does not sync across devices.
 
+### Searching within a table
+
+Click **Search** in the toolbar and type in the search bar. Search covers filtered records and visible columns in the current view, including records in collapsed groups. Hidden columns and filtered-out records are excluded.
+
+- Search uses case-insensitive literal substring matching. Each matching cell counts once. Navigation follows the current sort, group, and column order without hiding other records.
+- Matching cells are highlighted; the current match also has an accent outline and scrolls into view. Use the arrow buttons, or Enter / Shift+Enter in the search input, to visit the next / previous cell. Navigation wraps at either end.
+- Text and links match their stored source, including Markdown syntax and link addresses. Select fields match option labels; attachments match filenames and paths; numbers match their text values; dates match both displayed and full stored values. Checkboxes, internal IDs, and attachment contents are excluded. Regular expressions and fuzzy matching are not supported.
+- Visiting a collapsed group temporarily expands it. Close the bar or press Esc within it to clear highlights and restore group collapse states you have not manually changed. Esc in a cell editor still cancels editing.
+- Search is not saved to the note and does not change filters, sorting, field visibility, or export scope. Search survives table rebuilds after editing; switching views clears the query, and closing the note ends the session. Obsidian's native ⌘/Ctrl+F keeps its existing behavior.
+
 ### Filtering and sorting
 
 ![AND filter conditions with grouped results](images/filters-and-groups.png)
@@ -125,7 +135,7 @@ A few conditions need clarification:
 - **Dates**: Compare calendar days, date-times compare minutes, and time-only fields compare hours/minutes. Other display formats still use full dates.
 - **Text and attachments**: Text comparisons use case-insensitive Markdown source. Attachment **Is empty** checks references, not whether files exist.
 
-Choose **Sort ascending** or **Sort descending** in a column menu. **Clear sort** restores manual row order. Each view supports one sort field.
+Choose **Sort ascending** or **Sort descending** in a column menu. Empty values appear last in both directions. **Clear sort** restores manual row order. Each view supports one sort field.
 
 ### Grouping
 

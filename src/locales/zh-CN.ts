@@ -1,6 +1,14 @@
 import type { MessageKey } from "./en";
 
 export const zhCN: Record<MessageKey, string> = {
+  "Search": "搜索",
+  "Search current view": "搜索当前视图",
+  "Search cells…": "搜索单元格…",
+  "No matches in this view": "当前视图无匹配结果",
+  "{current} / {total} cells": "{current} / {total} 格",
+  "Previous match": "上一个匹配单元格",
+  "Next match": "下一个匹配单元格",
+  "Close search": "关闭搜索",
   "The filter structure is unsupported.": "筛选结构不受支持。",
   "Filter field “{id}” was not found.": "找不到筛选字段“{id}”。",
   "A filter option in “{name}” was not found.": "找不到字段“{name}”中的筛选选项。",

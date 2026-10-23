@@ -18,6 +18,8 @@ import { markdownPreviewCache } from "./markdown-preview";
 import { rememberedView, rememberView } from "./view-state";
 import { attachmentIcon, AttachmentCellController, renderAttachmentCell } from "./attachments";
 import { attachmentFileNameWithSuffix, noteNamedAttachmentFolder, pastedImageFileName, SuperTableSettings } from "./settings";
+import { attachSearchState, CellMatch, findCells } from "./search";
+import { cancelViewportRestorations, followViewportTarget, hasHistoryViewportRestoration, registerViewportRestoration } from "./viewport";
 
 interface PendingTableFocus {
   cell?: { rowId: string; fieldId: string };
@@ -476,6 +478,7 @@ export function trackLivePreviewHistoryViewport(
   let pending: { targetDocument: string; positions: ScrollPositionSnapshot[] } | null = null;
   let settleTimer: number | null = null;
   let expiryTimer: number | null = null;
+  let releaseRestoration: (() => void) | undefined;
 
   const currentDocument = () => editorView.state.doc.toString();
   const activePathMatches = () => app.workspace?.getActiveViewOfType?.(MarkdownView)?.file?.path === sourcePath;
@@ -485,6 +488,7 @@ export function trackLivePreviewHistoryViewport(
     clearPendingTimers();
     observer.disconnect();
     pending = null;
+    releaseRestoration?.(); releaseRestoration = undefined;
     stableDocument = targetDocument;
     stablePositions = capture();
   };
@@ -509,7 +513,16 @@ export function trackLivePreviewHistoryViewport(
       restorePending();
       return;
     }
-    pending = { targetDocument, positions: pending?.positions ?? stablePositions };
+    // Focused table history already preserves its cell anchor. Native note history
+    // needs the offset fallback only when no table controller owns this transition.
+    if (hasHistoryViewportRestoration(editorView.dom, cancelPendingForUserInput)) {
+      stableDocument = targetDocument; stablePositions = capture();
+      return;
+    }
+    const positions = pending?.positions ?? stablePositions;
+    cancelViewportRestorations(editorView.dom);
+    pending = { targetDocument, positions };
+    releaseRestoration = registerViewportRestoration(mutationRoot, "history", cancelPendingForUserInput);
     observer.observe(mutationRoot, { childList: true, subtree: true, characterData: true });
     restorePending();
     if (expiryTimer !== null) win.clearTimeout(expiryTimer);
@@ -534,6 +547,7 @@ export function trackLivePreviewHistoryViewport(
     clearPendingTimers();
     observer.disconnect();
     pending = null;
+    releaseRestoration?.(); releaseRestoration = undefined;
     stableDocument = editorDocumentFingerprint(currentDocument());
     stablePositions = capture();
   };
@@ -590,6 +604,14 @@ interface ScrollPositionSnapshot {
   top: number;
 }
 
+function tableRootsInMode(container: HTMLElement, tableId: string, isLivePreview: boolean): HTMLElement[] {
+  // Obsidian retains a hidden editor beside Reading View. Its copy of the
+  // table must never become the viewport anchor after a preview block rebuild.
+  const otherMode = isLivePreview ? ".markdown-preview-view" : ".markdown-source-view";
+  return [...container.querySelectorAll<HTMLElement>(".tablebase-root[data-table-id]")]
+    .filter((candidate) => candidate.dataset.tableId === tableId && !candidate.closest(otherMode));
+}
+
 /** Preserve Obsidian's note viewport while a save rebuilds Reading View content or the Live Preview widget. */
 function preserveNoteViewportScroll(
   app: App,
@@ -597,13 +619,14 @@ function preserveNoteViewportScroll(
   root: HTMLElement,
   activeCellElement: HTMLTableCellElement | null,
   isLivePreview: boolean,
-  options: { editorView?: EditorView; anchorToTableHeader?: boolean; preserveScrollPosition?: boolean } = {},
-): { finish(): void } | null {
+  options: { editorView?: EditorView; anchorToTableHeader?: boolean; preserveScrollPosition?: boolean; history?: boolean } = {},
+): { finish(): void; cancel(): void } | null {
   const view = app.workspace?.getActiveViewOfType?.(MarkdownView);
   if (view?.file?.path !== sourcePath || (view.getMode() !== "preview" && !isLivePreview)) return null;
   const doc = root.ownerDocument;
   const win = doc.defaultView;
   if (!win) return null;
+  cancelViewportRestorations(root);
   const tableId = root.dataset.tableId;
   const visibleBounds = view.containerEl.getBoundingClientRect();
   const tableToolbar = options.anchorToTableHeader ? root.querySelector<HTMLElement>(".tb-toolbar") : null;
@@ -659,8 +682,7 @@ function preserveNoteViewportScroll(
   const currentRoot = (): HTMLElement | null => {
     if (root.isConnected) return root;
     if (!tableId) return null;
-    return [...view.containerEl.querySelectorAll<HTMLElement>(".tablebase-root[data-table-id]")]
-      .find((candidate) => candidate.dataset.tableId === tableId) ?? null;
+    return tableRootsInMode(view.containerEl, tableId, isLivePreview)[0] ?? null;
   };
   const currentAnchor = (): HTMLElement | null => {
     const tableRoot = currentRoot();
@@ -687,6 +709,7 @@ function preserveNoteViewportScroll(
   let restoreFrame: number | null = null;
   let settleTimer: number | null = null;
   let expiryTimer: number | null = null;
+  let releaseRestoration: (() => void) | undefined;
 
   const restore = () => {
     if (stopped) return;
@@ -714,8 +737,10 @@ function preserveNoteViewportScroll(
   const stop = () => {
     if (stopped) return;
     stopped = true;
+    releaseRestoration?.(); releaseRestoration = undefined;
     observer.disconnect();
     if (restoreFrame !== null) win.cancelAnimationFrame(restoreFrame);
+    positions.forEach(({ element }) => element.removeEventListener("scroll", scheduleRestore));
     if (settleTimer !== null) win.clearTimeout(settleTimer);
     if (expiryTimer !== null) win.clearTimeout(expiryTimer);
     doc.removeEventListener("wheel", cancelForUserInput, true);
@@ -741,6 +766,8 @@ function preserveNoteViewportScroll(
     if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) stop();
   };
   const observer = new win.MutationObserver(scheduleRestore);
+  releaseRestoration = registerViewportRestoration(view.containerEl, options.history ? "history" : "save", stop);
+  positions.forEach(({ element }) => element.addEventListener("scroll", scheduleRestore, { passive: true }));
   observer.observe(view.containerEl, { childList: true, subtree: true, characterData: true });
   doc.addEventListener("wheel", cancelForUserInput, true);
   doc.addEventListener("touchstart", cancelForUserInput, true);
@@ -748,6 +775,7 @@ function preserveNoteViewportScroll(
   doc.addEventListener("keydown", cancelForScrollKey, true);
   expiryTimer = win.setTimeout(stop, 1500);
   return {
+    cancel: stop,
     finish() {
       if (stopped) return;
       finished = true;
@@ -879,6 +907,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
   let pointerDownWillOpenAttachments = false;
   let lastPointerEditableCell: HTMLTableCellElement | null = null;
   let pointerDownCell: HTMLTableCellElement | null = null;
+  let pointerDownWasCellControl = false;
   let pointerDownWillEditCell = false;
   const rowElementsById = new Map<string, HTMLTableRowElement>();
   const selectedRows = new Set<string>();
@@ -913,6 +942,11 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     const group = view.group && table.fields.some((field) => field.id === view.group!.fieldId) ? view.group : undefined;
     return sort === view.sort && group === view.group ? view : { ...view, sort, group };
   };
+  const searchSession = attachSearchState(plugin, root, tableKey, currentView().id);
+  const search = searchSession.state;
+  let searchMatches: CellMatch[] = [];
+  const highlightedSearchCells = new Set<HTMLElement>();
+  let searchFrame: number | null = null;
   const prompt = (title: string, fields: FormField[], label?: string, options?: PromptFormOptions) => promptForm(plugin.app, title, fields, label, options);
   const confirm = (title: string, message: string, label?: string) => confirmDialog(plugin.app, title, message, label);
   const report = (error: unknown) => { new Notice(errorMessage(error)); };
@@ -1339,6 +1373,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
           if (restoreTableFocus && !root.contains(root.ownerDocument.activeElement)) root.focus({ preventScroll: true });
         }
         restoreAttachmentPanel(panelState);
+        refreshSearch(); paintSearch();
         return true;
       } catch (error) {
         const panelState = attachmentPanelState();
@@ -1417,8 +1452,121 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     parent.append(item); return item;
   }
 
+  function captureSearchFocus(): void {
+    const input = root.querySelector<HTMLInputElement>(".tb-search-input");
+    if (search.open && input && root.ownerDocument.activeElement === input) {
+      search.focus = { start: input.selectionStart, end: input.selectionEnd };
+    }
+  }
+
+  function refreshSearch(): void {
+    if (search.viewId !== currentView().id) {
+      search.viewId = currentView().id; search.query = ""; search.current = undefined;
+      search.expanded.clear(); delete search.focus;
+    }
+    searchMatches = search.open ? findCells(projection().rows, visibleFields(table, currentView()), search.query) : [];
+    search.current = searchMatches.find((match) => match.rowId === search.current?.rowId && match.fieldId === search.current.fieldId) ?? searchMatches[0];
+  }
+
+  function expandSearchGroup(): void {
+    const group = projection().groups?.find((item) => item.rows.some((row) => row.id === search.current?.rowId));
+    if (group) search.expanded.add(`${currentView().id}:${currentView().group?.fieldId}:${group.key}`);
+  }
+
+  function paintSearch(): void {
+    highlightedSearchCells.forEach((cell) => cell.classList.remove("is-search-match", "is-search-current"));
+    highlightedSearchCells.clear();
+    if (!search.open) return;
+    const matches = new Map<string, Set<string>>();
+    for (const match of searchMatches) {
+      const fields = matches.get(match.rowId) ?? new Set<string>(); fields.add(match.fieldId); matches.set(match.rowId, fields);
+    }
+    for (const cell of root.querySelectorAll<HTMLTableCellElement>("td.tb-cell")) {
+      const rowId = cell.parentElement?.dataset.rowId;
+      cell.classList.toggle("is-search-match", !!rowId && !!matches.get(rowId)?.has(cell.dataset.fieldId!));
+      cell.classList.toggle("is-search-current", !!search.current && rowId === search.current.rowId && cell.dataset.fieldId === search.current.fieldId);
+      if (cell.classList.contains("is-search-match")) highlightedSearchCells.add(cell);
+    }
+    const status = root.querySelector<HTMLElement>(".tb-search-status");
+    if (status) status.textContent = !search.query ? "" : !searchMatches.length ? t("No matches in this view")
+      : t("{current} / {total} cells", { current: searchMatches.findIndex((match) => match === search.current) + 1, total: searchMatches.length });
+    root.querySelectorAll<HTMLButtonElement>(".tb-search-previous, .tb-search-next").forEach((button) => { button.disabled = !searchMatches.length; });
+  }
+
+  let stopSearchReveal: (() => void) | undefined;
+  function revealSearchMatch(): void {
+    if (searchFrame !== null) viewportWindow.cancelAnimationFrame(searchFrame);
+    searchFrame = viewportWindow.requestAnimationFrame(() => {
+      searchFrame = null;
+      if (destroyed || !root.isConnected || !search.current) return;
+      const cell = root.querySelector<HTMLElement>(".is-search-current");
+      if (!cell) return;
+      const toolbar = root.querySelector<HTMLElement>(".tb-toolbar");
+      cell.style.scrollMarginTop = `${(toolbar?.getBoundingClientRect().height ?? 0) + 16}px`;
+      stopSearchReveal?.();
+      const view = plugin.app.workspace?.getActiveViewOfType?.(MarkdownView);
+      stopSearchReveal = followViewportTarget(root, view?.containerEl ?? root, () => {
+        root.querySelector<HTMLElement>(".is-search-current")?.scrollIntoView?.({ block: "nearest", inline: "nearest", behavior: "instant" });
+      });
+    });
+  }
+
+  function updateSearch(move = 0): void {
+    refreshSearch();
+    if (move && searchMatches.length) {
+      const index = searchMatches.indexOf(search.current!);
+      search.current = searchMatches[(index + move + searchMatches.length) % searchMatches.length];
+      refreshSearch();
+    }
+    expandSearchGroup();
+    if (search.current && !rowElementsById.has(search.current.rowId)) render();
+    else paintSearch();
+    revealSearchMatch();
+  }
+
+  function closeSearch(): void {
+    stopSearchReveal?.();
+    search.open = false; search.query = ""; search.current = undefined; search.expanded.clear(); delete search.focus;
+    render(); root.querySelector<HTMLButtonElement>(".tb-search-toggle")?.focus({ preventScroll: true });
+  }
+
+  function renderSearchBar(toolbar: HTMLElement): void {
+    const bar = el("div", "tb-search-bar tb-ui-surface");
+    bar.setAttribute("role", "search");
+    const input = el("input", "tb-search-input"); input.type = "text"; input.value = search.query;
+    input.dataset.focusKey = "table-search"; input.placeholder = t("Search cells…");
+    const label = hiddenAccessibleLabel(t("Search current view")); input.setAttribute("aria-labelledby", label.id);
+    bar.setAttribute("aria-labelledby", label.id);
+    input.onfocus = captureSearchFocus;
+    input.onblur = () => { if (input.isConnected) delete search.focus; };
+    input.oninput = (event) => {
+      search.query = input.value; search.current = undefined; captureSearchFocus();
+      if (!(event as InputEvent).isComposing) updateSearch();
+    };
+    input.addEventListener("compositionend", () => { search.query = input.value; search.current = undefined; captureSearchFocus(); updateSearch(); });
+    const status = el("span", "tb-search-status"); status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite");
+    const actions = el("div", "tb-search-actions");
+    const searchButton = (name: Parameters<typeof t>[0], glyph: string, className: string, action: () => void) => {
+      const button = control("", glyph, `tb-icon-button ${className}`);
+      const nameLabel = hiddenAccessibleLabel(t(name)); button.removeAttribute("aria-label"); button.setAttribute("aria-labelledby", nameLabel.id);
+      button.onclick = action; actions.append(nameLabel, button);
+    };
+    searchButton("Previous match", "arrow-up", "tb-search-previous", () => updateSearch(-1));
+    searchButton("Next match", "arrow-down", "tb-search-next", () => updateSearch(1));
+    searchButton("Close search", "x", "tb-search-close", closeSearch);
+    bar.onkeydown = (event) => {
+      if (event.isComposing) return;
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeSearch(); }
+      else if (event.key === "Enter" && event.target === input) {
+        event.preventDefault(); event.stopPropagation(); updateSearch(event.shiftKey ? -1 : 1);
+      }
+    };
+    bar.append(label, input, el("span", "tb-search-scope", t("Current view")), status, actions); toolbar.append(bar);
+  }
+
   function render(): void {
     if (destroyed) return;
+    captureSearchFocus();
     if (groupPanelOpen) openGroupConfigPopovers.get(tableKey)?.close(false, true);
     closeLinkEditors();
     disposeTextEditors();
@@ -1435,6 +1583,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     root.replaceChildren();
     activeCellElement = null;
     const view = currentView();
+    refreshSearch();
     const activeFilters = activeFilterConditions(table.fields, view.filters);
     const activeFilterFieldIds = new Set(activeFilters.map((rule) => rule.fieldId));
     rememberView(plugin.app, tableKey, view.id);
@@ -1474,6 +1623,11 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
       groupButton.setAttribute("aria-expanded", "true");
       groupButton.setAttribute("aria-controls", openGroupPopover.panelId);
     }
+    const searchButton = toolbarButton(toolbar, t("Search"), "search", () => {
+      if (search.open) { closeSearch(); return; }
+      search.open = true; render(); root.querySelector<HTMLInputElement>(".tb-search-input")?.focus({ preventScroll: true });
+    }, search.open);
+    searchButton.classList.add("tb-search-toggle"); searchButton.setAttribute("aria-expanded", String(search.open));
     const exportButton = toolbarButton(toolbar, t("Export"), "file-output", (event) => openExportMenu(exportButton, event));
     exportButton.setAttribute("aria-haspopup", "menu");
     if (rowClipboard?.rows.length) toolbarButton(toolbar, t(rowClipboard.rows.length === 1 ? "Paste {count} row" : "Paste {count} rows", { count: rowClipboard.rows.length }), "clipboard-paste", () => pasteInternal(false));
@@ -1484,6 +1638,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     }, selectionMode);
     const count = projection().rows.length;
     toolbar.append(el("span", "tb-count", t("{visible} of {total}", { visible: count, total: table.records.length })));
+    if (search.open) renderSearchBar(toolbar);
     shell.append(toolbar);
     if (selectionMode) shell.append(renderSelectionBar());
     const wrap = el("div", "tb-table-scroll"); wrap.id = scrollRegionId; wrap.append(renderGrid(activeFilterFieldIds)); shell.append(wrap); root.append(shell);
@@ -1500,6 +1655,12 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
       }
     }
     restoreActiveCell();
+    paintSearch();
+    if (search.open && search.focus) {
+      const input = root.querySelector<HTMLInputElement>(".tb-search-input");
+      const focus = search.focus;
+      input?.focus({ preventScroll: true }); input?.setSelectionRange(focus.start, focus.end);
+    }
     if (groupPanelOpen) openGroupConfig(groupButton);
     scheduleLayout();
     scheduleProxyUpdate();
@@ -2090,16 +2251,17 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
       const line = el("tr", "tb-group-row"); const cell = el("td"); cell.colSpan = span;
       const content = el("div", "tb-group-content");
       const key = `${currentView().id}:${currentView().group?.fieldId}:${group.key}`;
-      const toggle = control("", collapsed.has(key) ? "chevron-right" : "chevron-down", "tb-icon-button");
-      toggle.setAttribute("aria-label", t(collapsed.has(key) ? "Expand {name}" : "Collapse {name}", { name: group.label })); toggle.setAttribute("aria-expanded", String(!collapsed.has(key)));
-      const collapse = () => { if (collapsed.has(key)) collapsed.delete(key); else collapsed.add(key); render(); };
+      const isCollapsed = collapsed.has(key) && !search.expanded.has(key);
+      const toggle = control("", isCollapsed ? "chevron-right" : "chevron-down", "tb-icon-button");
+      toggle.setAttribute("aria-label", t(isCollapsed ? "Expand {name}" : "Collapse {name}", { name: group.label })); toggle.setAttribute("aria-expanded", String(!isCollapsed));
+      const collapse = () => { search.expanded.delete(key); if (isCollapsed) collapsed.delete(key); else collapsed.add(key); render(); };
       line.onclick = collapse;
       const groupField = table.fields.find((field) => field.id === currentView().group?.fieldId);
       const option = groupField?.options?.find((option) => group.key === `value:${option.id}`);
       content.append(toggle, el("span", `tb-group-label${option ? ` tb-pill tb-color-${option.color}` : ""}`, group.label), el("span", "tb-group-count", String(group.rows.length)));
       const add = control("", "plus", "tb-icon-button tb-group-add"); add.setAttribute("aria-label", t("Add row to {name}", { name: group.label }));
       add.onclick = (event) => { event.stopPropagation(); void insertGroupRow(group); }; content.append(add); cell.append(content); line.append(cell); body.append(line);
-      if (!collapsed.has(key)) group.rows.forEach((row) => body.append(renderRow(row, fields)));
+      if (!isCollapsed) group.rows.forEach((row) => body.append(renderRow(row, fields)));
     });
     else rows.forEach((row) => body.append(renderRow(row, fields)));
     if (!rows.length) { const tr = el("tr"); const td = el("td", "tb-empty", table.records.length ? t("No rows match the filters.") : t("No rows yet.")); td.colSpan = span; tr.append(td); body.append(tr); }
@@ -2868,14 +3030,27 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     if (context.save) root.focus({ preventScroll: true });
     if (!options.reveal) return;
     viewportWindow.requestAnimationFrame(() => {
-      if (destroyed || !root.isConnected) return;
-      const element = rowElementsById.get(rowId);
+      let tableRoot: HTMLElement | null = root.isConnected ? root : null;
+      if (!tableRoot) {
+        const view = plugin.app.workspace?.getActiveViewOfType?.(MarkdownView);
+        if (view?.file?.path === context.sourcePath) {
+          const candidates = tableRootsInMode(view.containerEl, table.tableId, !!context.save);
+          tableRoot = candidates.find((candidate) => [...candidate.querySelectorAll<HTMLTableRowElement>("tr.tb-data-row")]
+            .some((row) => row.dataset.rowId === rowId)) ?? candidates[0] ?? null;
+        }
+      }
+
+      if (!tableRoot) return;
+      const element = [...tableRoot.querySelectorAll<HTMLTableRowElement>("tr.tb-data-row")]
+        .find((row) => row.dataset.rowId === rowId);
       if (!element) {
         if (options.warnIfHidden) new Notice(t("The row was added, but is not visible in this view."));
         return;
       }
-      if (isRowVisibleInViewport(element)) return;
-      element.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+      // Explicit row navigation takes over from both note-anchor and editor save restoration.
+      cancelViewportRestorations(tableRoot);
+      // CodeMirror's row-height measurements interrupt browser smooth scrolling mid-flight.
+      if (!isRowVisibleInViewport(element)) element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
     });
   }
 
@@ -3869,7 +4044,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
       if (replacement) (cell || replacement).focus({ preventScroll: true });
       else view.editor.focus?.();
     };
-    const viewportRestoration = preserveNoteViewportScroll(plugin.app, context.sourcePath, root, activeCellElement, !!context.save);
+    const viewportRestoration = preserveNoteViewportScroll(plugin.app, context.sourcePath, root, activeCellElement, !!context.save, { history: true });
     try { if (isUndo) view.editor.undo(); else view.editor.redo(); }
     finally {
       restoreFocus();
@@ -3904,7 +4079,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
           if (hasReadingViewTableHistory(context.sourcePath, direction)) {
             event.preventDefault(); event.stopPropagation();
             const restoreTableFocus = root.contains(root.ownerDocument.activeElement) || root.contains(target);
-            const viewportRestoration = preserveNoteViewportScroll(plugin.app, context.sourcePath, root, activeCellElement, false);
+            const viewportRestoration = preserveNoteViewportScroll(plugin.app, context.sourcePath, root, activeCellElement, false, { history: true });
             if (restoreTableFocus) requestReadingViewFocus();
             void applyReadingViewTableHistory(plugin, context.sourcePath, direction).then((body) => {
               if (!body || destroyed) return;
@@ -3967,7 +4142,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
         hasReadingViewTableHistory(context.sourcePath, isUndo ? "undo" : "redo")) {
       event.preventDefault(); event.stopImmediatePropagation();
       const restoreTableFocus = targetWithinTable || focusWithinTable;
-      const viewportRestoration = preserveNoteViewportScroll(plugin.app, context.sourcePath, root, activeCellElement, false);
+      const viewportRestoration = preserveNoteViewportScroll(plugin.app, context.sourcePath, root, activeCellElement, false, { history: true });
       if (restoreTableFocus) requestReadingViewFocus();
       void applyReadingViewTableHistory(plugin, context.sourcePath, isUndo ? "undo" : "redo").then((body) => {
         if (!body || destroyed) return;
@@ -4119,6 +4294,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     return !!interactiveElement && cell.contains(interactiveElement);
   };
   const onDocumentPointerDown = (event: PointerEvent) => {
+    pointerDownWasCellControl = false;
     const target = event.target;
     if (!(target instanceof Element) || !target.closest(".tablebase-root")) clearRecentReadingViewTableWrite();
     const targetNode = target instanceof Node ? target : null;
@@ -4147,6 +4323,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     }
     const isCellControl = target instanceof Element && isCellControlTarget(cell, target);
     pointerDownCell = cell;
+    pointerDownWasCellControl = isCellControl;
     pointerDownWillOpenAttachments = attachmentCells.has(cell) && !isCellControl && activeCellElement === cell;
     pointerDownWillEditCell = cellEditors.has(cell) && !isCellControl && lastPointerEditableCell === cell && activeCellElement === cell;
     if (!pointerDownWillEditCell) lastPointerEditableCell = null;
@@ -4240,6 +4417,14 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     // suppress repeat-click editing, while Markdown links remain editable content.
     const isCellControl = isCellControlTarget(cell, target);
     const pointerClick = event.type === "click" && pointerDownCell === cell;
+    if (pointerClick && pointerDownWasCellControl && !isCellControl) {
+      // A drag from an editor to its cell edge retargets click to their common
+      // ancestor. Focusing the cell here would blur the editor and discard selection.
+      pointerDownCell = null; pointerDownWasCellControl = false;
+      pointerDownWillEditCell = false; pointerDownWillOpenAttachments = false; lastPointerEditableCell = null;
+      event.preventDefault(); event.stopPropagation();
+      return;
+    }
     if (pointerClick && pointerDownWillEditCell && activeCellElement === cell && cellEditors.has(cell) && !isCellControl) {
       pointerDownCell = null; pointerDownWillEditCell = false; lastPointerEditableCell = null;
       event.preventDefault(); event.stopPropagation();
@@ -4375,6 +4560,10 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
   const detachFilterSession = attachFilterSession(tableKey, filterSession);
   render();
   return { destroy() {
+    stopSearchReveal?.();
+    captureSearchFocus(); searchSession.detach();
+    highlightedSearchCells.clear();
+    if (searchFrame !== null) viewportWindow.cancelAnimationFrame(searchFrame);
     destroyed = true; detachFilterSession(); closeLinkEditors(); disposeTextEditors();
     openGroupConfigPopovers.get(tableKey)?.close(false, true);
     closeMultiSelectPicker();

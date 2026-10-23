@@ -414,21 +414,35 @@ export function filterAndSortRows(table: TableDocument, view: TableView): Record
   const rows = filterRows(table.fields, table.records, view.filters);
   if (view.sort) {
     const field = table.fields.find((item) => item.id === view.sort!.fieldId);
-    if (field) rows.sort((a, b) => view.sort!.direction === "desc" ? compareCells(field, b.values[field.id], a.values[field.id]) : compareCells(field, a.values[field.id], b.values[field.id]));
+    if (field) rows.sort((a, b) => compareCells(field, a.values[field.id], b.values[field.id], view.sort!.direction));
   }
   return rows;
 }
 
-export function compareCells(field: Field, a: CellValue, b: CellValue): number {
-  if (field.type === "checkbox") return Number(a === true) - Number(b === true);
-  if (field.type === "number") {
+function isEmptySortValue(value: CellValue): boolean {
+  if (value == null) return true;
+  if (typeof value === "string") return value.trim() === "";
+  return Array.isArray(value) && value.length === 0;
+}
+
+export function compareCells(field: Field, a: CellValue, b: CellValue, direction: Direction = "asc"): number {
+  const aEmpty = isEmptySortValue(a);
+  const bEmpty = isEmptySortValue(b);
+  if (aEmpty !== bEmpty) return aEmpty ? 1 : -1;
+  if (aEmpty) return 0;
+
+  let comparison: number;
+  if (field.type === "checkbox") comparison = Number(a === true) - Number(b === true);
+  else if (field.type === "number") {
     const number = (value: CellValue) => Number.parseFloat(String(value ?? "")) || 0;
-    return number(a) - number(b);
+    comparison = number(a) - number(b);
+  } else {
+    const label = (value: CellValue) => field.options?.find((option) => option.id === value)?.label ?? String(value ?? "");
+    const text = (value: CellValue) => field.type === "multiselect" || field.type === "attachment" ? (Array.isArray(value) ? value : []).map(label).join(",")
+      : ["select", "status"].includes(field.type) ? label(value) : String(value ?? "");
+    comparison = text(a).localeCompare(text(b), undefined, { numeric: true });
   }
-  const label = (value: CellValue) => field.options?.find((option) => option.id === value)?.label ?? String(value ?? "");
-  const text = (value: CellValue) => field.type === "multiselect" || field.type === "attachment" ? (Array.isArray(value) ? value : []).map(label).join(",")
-    : ["select", "status"].includes(field.type) ? label(value) : String(value ?? "");
-  return text(a).localeCompare(text(b), undefined, { numeric: true });
+  return direction === "desc" ? -comparison : comparison;
 }
 
 export function groupRows(table: TableDocument, view: TableView, rows: RecordRow[]): DataGroup[] {
