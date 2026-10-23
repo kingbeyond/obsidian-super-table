@@ -1541,7 +1541,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     input.onblur = () => { if (input.isConnected) delete search.focus; };
     input.oninput = (event) => {
       search.query = input.value; search.current = undefined; captureSearchFocus();
-      if (!(event as InputEvent).isComposing) updateSearch();
+      if (!("isComposing" in event && event.isComposing)) updateSearch();
     };
     input.addEventListener("compositionend", () => { search.query = input.value; search.current = undefined; captureSearchFocus(); updateSearch(); });
     const status = el("span", "tb-search-status"); status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite");
