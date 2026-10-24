@@ -15,6 +15,45 @@ export function needsMarkdownRendering(source: string): boolean {
     || /<\/?[A-Za-z][^>]*>/.test(source);
 }
 
+/** Keep source spacing without counting Obsidian's <br>\n output twice. */
+export function normalizeMarkdownPreviewLineBreaks(rendered: HTMLElement, source: string): void {
+  rendered.querySelectorAll("br").forEach((br) => {
+    if (br.closest("pre, code")) return;
+    const next = br.nextSibling;
+    if (next?.nodeType === 3) next.textContent = (next.textContent ?? "").replace(/^(?:\r\n|\r|\n)/, "");
+  });
+
+  // Only map ordinary paragraphs. Lists, code, HTML and other block structures
+  // keep the host's layout; a mismatched paragraph count is deliberately skipped.
+  const paragraphs = [...rendered.children];
+  if (!paragraphs.length || paragraphs.some((node) => node.tagName !== "P")
+    || paragraphs.some((node) => node.classList.contains("tb-markdown-source-paragraph"))
+    || [...rendered.childNodes].some((node) => node.nodeType === 3 && node.textContent?.trim())
+    || /<\/?[A-Za-z][^>]*>/.test(source)) return;
+  const lines = source.split(/\r\n|\r|\n/);
+  const gaps: number[] = [];
+  let inParagraph = false;
+  let blankLines = 0;
+  for (const line of lines) {
+    if (!line.trim()) { blankLines++; inParagraph = false; }
+    else if (!inParagraph) { gaps.push(blankLines); blankLines = 0; inParagraph = true; }
+  }
+  if (gaps.length !== paragraphs.length) return;
+  const appendBlankLines = (count: number) => {
+    if (!count) return;
+    const node = rendered.createSpan({ cls: "tb-markdown-blank-lines" });
+    node.style.height = `${count * 1.4}em`;
+    node.setAttribute("aria-hidden", "true");
+  };
+  rendered.replaceChildren();
+  paragraphs.forEach((paragraph, index) => {
+    appendBlankLines(gaps[index]);
+    paragraph.classList.add("tb-markdown-source-paragraph");
+    rendered.append(paragraph);
+  });
+  appendBlankLines(blankLines);
+}
+
 function fenceLine(line: string): { marker: string; length: number } | null {
   const withoutQuotes = line.replace(/^(?:[ \t]{0,3}>[ \t]?)+/, "");
   const match = withoutQuotes.match(/^[ \t]{0,3}(`{3,}|~{3,})(.*)$/);

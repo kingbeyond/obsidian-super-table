@@ -4,14 +4,16 @@
 
 Try the [example tables](examples/README.md) in your vault.
 
-Version 1.0.4 and later require Obsidian 1.13.0 or newer. Versions 1.0.1–1.0.3 retain their Obsidian 1.8.7 minimum.
+Requires Obsidian 1.13.0 or newer.
 
 ## Creating and viewing tables
 
 In note editing mode, run **Super Table: Insert table** or click the table button in the ribbon. You can also type an empty code block:
 
+````text
 ```super-table
 ```
+````
 
 An empty block displays a default sample table, saved into the note on the first edit. Tables are editable in Live Preview and Reading view; everyday use requires no JSON editing.
 
@@ -21,7 +23,8 @@ Click a cell to select it, then use the corresponding action:
 
 | Action | Method |
 | --- | --- |
-| Edit text or numbers | Click the cell body again or double-click it, or select it and press Enter or Space. |
+| Replace text or numbers | Select the cell and start typing to replace its value; Chinese IME input is supported. |
+| Edit existing text or numbers | Click the cell body again or double-click it, or select it and press Enter or Space to edit the existing value. |
 | Open choices, dates, links, or attachments | Select the cell and click its action button, or press Enter or Space. |
 | Save or cancel input | Click outside the input to save; press Escape to cancel. Markdown text shortcuts are listed below. |
 | Toggle a checkbox | Click it directly. |
@@ -31,11 +34,15 @@ Clearing an attachment cell removes its references without deleting vault files.
 
 Super Table supports undo and redo.
 
+Typing starts a draft; the original value is retained until you confirm or leave the input. Press Escape to cancel. Enter used to confirm an IME candidate does not save the cell. Number cells save only valid numbers; incomplete signs, decimal points, and other invalid input leave the original value unchanged.
+
 ### Markdown text
 
 Text cells support bold, italics, lists, and internal and external links, such as `[[Note name|Display name]]`. Click links to open them; click outside links and controls to edit the text.
 
 Press Enter or `Cmd/Ctrl+Enter` to save, or Shift+Enter for a line break. You can paste multiline Markdown; copying a cell preserves its source.
+
+Plain text and ordinary Markdown paragraphs preserve line breaks and blank lines, including consecutive and leading or trailing blank lines. Adding a link does not add extra line breaks. Lists use Obsidian's Markdown indentation and spacing at the cell's font size, including nested lists and paragraphs within list items. Code blocks retain their own line breaks and blank lines.
 
 Use `- [ ] To do` and `- [x] Done` for task lists, and toggle tasks in the preview. If a task cannot be toggled, edit its source.
 

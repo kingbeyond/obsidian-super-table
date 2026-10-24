@@ -10,7 +10,7 @@ import { createDefaultTable, defaultCell, normalizeTable, groupRows, filterAndSo
 import { convertMarkdownTable, convertSmartTable, fromClipboardRows } from "../src/import";
 import { applyMarkdownExportToNote, scanFencedBlocks, replaceTableBlockInText, serializeTable, serializeTableBody, readTable, readTableId, persistTable, writeMarkdownExport, hasReadingViewTableHistory, applyReadingViewTableHistory } from "../src/storage";
 import { captureRows, cellLabel, clipboardValues, linkEditorFields, parseWebLink, reconcileOptions, moveRelative, serializeWebLink, valueFromLabel } from "../src/interaction";
-import { findMarkdownTaskMarkers, needsMarkdownRendering, safeMarkdownEmbeds, setMarkdownTaskState } from "../src/markdown";
+import { findMarkdownTaskMarkers, needsMarkdownRendering, normalizeMarkdownPreviewLineBreaks, safeMarkdownEmbeds, setMarkdownTaskState } from "../src/markdown";
 import { markdownPreviewCache } from "../src/markdown-preview";
 import { confirmMarkdownReplacement, createExportFileName, renderTable, trackLivePreviewHistoryViewport } from "../src/renderer";
 import { convertSuperTableToMarkdown, createMarkdownExportFile } from "../src/markdown-export";
@@ -1059,11 +1059,12 @@ test("[markdown] Markdown previews preserve source line breaks after editing and
     await waitForCondition(() => !preview.classList.contains("is-markdown-pending"), "multiline Markdown preview rendering");
     assert.equal(ui.saved()?.records[0].values[fieldId], value);
     assert.ok(preview.classList.contains("has-source-line-breaks"));
-    assert.equal(dom.window.getComputedStyle(preview).whiteSpace, "pre-wrap");
+    assert.equal(dom.window.getComputedStyle(preview).whiteSpace, "normal");
     assert.equal(preview.textContent, value, "the plain-text preview should retain all source line breaks");
     assert.deepEqual([...preview.querySelectorAll<HTMLElement>(".tb-markdown-plain-line")].map((line) => line.textContent), ["first line", "", "", ""]);
     assert.equal(preview.querySelectorAll(".tb-markdown-line-separator").length, 3);
     assert.equal(dom.window.getComputedStyle(preview.querySelector<HTMLElement>(".tb-markdown-plain-line")!).minHeight, "1.4em");
+    assert.equal(dom.window.getComputedStyle(preview.querySelector<HTMLElement>(".tb-markdown-plain-line")!).whiteSpace, "pre-wrap");
 
     const reopenedCell = preview.closest<HTMLTableCellElement>("td")!;
     Object.defineProperty(reopenedCell, "clientHeight", { configurable: true, value: 30 });
@@ -1078,6 +1079,118 @@ test("[markdown] Markdown previews preserve source line breaks after editing and
     if (scrollHeightDescriptor) Object.defineProperty(dom.window.HTMLTextAreaElement.prototype, "scrollHeight", scrollHeightDescriptor);
     else delete (dom.window.HTMLTextAreaElement.prototype as { scrollHeight?: number }).scrollHeight;
   }
+});
+test("[markdown] host br/newline pairs render once while paragraph blank lines and spaces survive", () => {
+  for (const newline of ["\n", "\r\n", "\r"]) {
+    const rendered = document.createElement("div");
+    rendered.innerHTML = '<p>131<br>\n2131<br>\n<a href="https://example.com">Link</a></p>';
+    const source = ["131", "2131", "[Link](https://example.com)"].join(newline);
+    normalizeMarkdownPreviewLineBreaks(rendered, source);
+    assert.equal(rendered.querySelector("p")!.innerHTML, '131<br>2131<br><a href="https://example.com">Link</a>');
+    assert.equal(rendered.querySelectorAll("br").length, 2);
+    assert.equal(rendered.querySelectorAll(".tb-markdown-blank-lines").length, 0);
+  }
+  for (const count of [1, 2, 3]) {
+    const rendered = document.createElement("div");
+    rendered.innerHTML = '<p><strong>first  line</strong></p>\n<p>second<br>\n<a href="https://example.com">Link</a></p>';
+    const source = `\n\n**first  line**${"\n".repeat(count + 1)}second\n[Link](https://example.com)\n\n`;
+    normalizeMarkdownPreviewLineBreaks(rendered, source);
+    assert.deepEqual([...rendered.querySelectorAll<HTMLElement>(".tb-markdown-blank-lines")].map((node) => node.style.height), ["2.8em", `${count * 1.4}em`, "2.8em"]);
+    assert.equal(rendered.querySelector("strong")!.textContent, "first  line");
+    const html = rendered.innerHTML;
+    normalizeMarkdownPreviewLineBreaks(rendered, source);
+    assert.equal(rendered.innerHTML, html, "normalization must be idempotent");
+    const cache = markdownPreviewCache({}, document, "line-breaks.md");
+    cache.remember(source, rendered);
+    const restored = document.createElement("div");
+    assert.equal(cache.restore(source, restored), true);
+    assert.equal(restored.innerHTML, html, "cached previews retain normalized breaks and blank lines");
+  }
+});
+test("[markdown] spacing normalization keeps block structures, code whitespace and unmatched paragraphs", () => {
+  for (const [source, html] of [
+    ["- one\n- two", "<ul>\n<li>one</li>\n<li>two</li>\n</ul>"],
+    ["```text\na\n\nb\n```", "<pre><code>a\n\nb\n</code></pre>"],
+    ["<pre>a<br>\n b</pre>", "<pre>a<br>\n b</pre>"],
+    ["`a\n\nb`", "<p><code>a b</code></p>"],
+    ["<p>one</p>\n\n<p>two</p>", "<p>one</p>\n<p>two</p>"],
+  ]) {
+    const rendered = document.createElement("div"); rendered.innerHTML = html;
+    normalizeMarkdownPreviewLineBreaks(rendered, source);
+    assert.equal(rendered.innerHTML, html);
+  }
+  const rendered = document.createElement("div");
+  rendered.innerHTML = '<blockquote><p>one<br>\ntwo</p></blockquote><ul><li><input type="checkbox">task<br>\ncontinued</li></ul>';
+  normalizeMarkdownPreviewLineBreaks(rendered, "> one\n> two\n\n- [ ] task\n  continued");
+  assert.equal(rendered.querySelector("blockquote p")!.innerHTML, "one<br>two");
+  assert.ok(rendered.querySelector('li input[type="checkbox"]'));
+  assert.equal(rendered.querySelectorAll(".tb-markdown-source-paragraph").length, 0);
+});
+test("[markdown][interaction] rendered multiline links keep their source when reopened and saved", async () => {
+  const originalRender = MarkdownRenderer.render;
+  const source = "\n**first**\n\n\nsecond\n[Link](https://example.com)\n";
+  MarkdownRenderer.render = async (_app, markdown, element) => {
+    assert.equal(markdown, source);
+    element.innerHTML = '<p><strong>first</strong></p>\n<p>second<br>\n<a href="https://example.com">Link</a></p>';
+  };
+  const table = fixture(); delete table.views[0].sort; delete table.views[0].group;
+  const fieldId = table.fields[0].id;
+  table.records[0].values[fieldId] = source;
+  const ui = mount(table);
+  try {
+    const preview = ui.root.querySelector<HTMLElement>(`td[data-field-id="${fieldId}"] .tb-markdown-content`)!;
+    await waitForCondition(() => !!preview.querySelector(".tb-markdown-source-paragraph"), "normalized Markdown paragraphs");
+    assert.equal(preview.getAttribute("contenteditable"), "false", "the preview must not inherit the cell's plaintext-only editing mode");
+    assert.ok(preview.classList.contains("markdown-rendered"), "Live Preview needs the same host Markdown style scope as reading view");
+    assert.equal(preview.querySelector("br")!.nextSibling!.textContent, "");
+    assert.equal(preview.querySelector("a")!.getAttribute("href"), "https://example.com");
+    assert.equal(preview.querySelector("a")!.getAttribute("contenteditable"), "false");
+    const cell = preview.closest<HTMLTableCellElement>("td")!;
+    const editor = openMarkdownEditor(cell);
+    assert.equal(editor.value, source);
+    editor.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    assert.equal(ui.saved(), null, "cancelling must not write normalized preview text");
+    const reopened = openMarkdownEditor(cell);
+    assert.equal(reopened.value, source);
+    reopened.blur();
+    assert.equal(table.records[0].values[fieldId], source);
+  } finally { ui.cleanup(); MarkdownRenderer.render = originalRender; }
+});
+test("[markdown][layout] list previews inherit host indentation and spacing without preserving structural newlines", () => {
+  const hostStyle = document.createElement("style");
+  hostStyle.textContent = `
+    .markdown-rendered ul, .markdown-rendered ol { padding-inline-start: 0; margin-block: 16px; }
+    .markdown-rendered ul > li { margin-inline-start: 3ch; }
+    .markdown-rendered ol > li { margin-inline-start: 4ch; }
+    .markdown-rendered ul ul, .markdown-rendered ul ol, .markdown-rendered ol ul, .markdown-rendered ol ol { margin-block: 0; }
+    .markdown-rendered li p { margin-block: 16px; }
+  `;
+  const style = document.createElement("style"); style.textContent = readFileSync("styles.css", "utf8");
+  const root = document.createElement("div"); root.className = "tablebase-root";
+  const preview = document.createElement("div"); preview.className = "tb-markdown-content markdown-rendered has-source-line-breaks";
+  preview.innerHTML = '<ul>\n<li>one<br>\ncontinued\n<ol>\n<li>nested</li>\n</ol>\n</li>\n<li><p>two</p>\n<p>another paragraph</p></li>\n</ul>\n<p>Link</p><pre><code>a\n\nb\n</code></pre>';
+  root.append(preview); document.head.append(hostStyle, style); document.body.append(root);
+  try {
+    const source = "- one\n  continued\n  1. nested\n- two\n\n  another paragraph\n\n[Link](https://example.com)\n\n```\na\n\nb\n```";
+    normalizeMarkdownPreviewLineBreaks(preview, source);
+    assert.equal(dom.window.getComputedStyle(preview).whiteSpace, "normal", "host HTML formatting newlines must not become line boxes");
+    for (const list of preview.querySelectorAll<HTMLElement>("ul, ol")) {
+      assert.equal(dom.window.getComputedStyle(list).paddingInlineStart, "0", "the plugin must not add a second list indent");
+    }
+    assert.equal(dom.window.getComputedStyle(preview.querySelector("li")!).marginInlineStart, "3ch");
+    assert.equal(dom.window.getComputedStyle(preview.querySelector("ol li")!).marginInlineStart, "4ch");
+    assert.equal(dom.window.getComputedStyle(preview.querySelector("ol")!).marginBlock, "0");
+    assert.equal(dom.window.getComputedStyle(preview.querySelector("li p")!).marginBlock, "16px", "loose-list paragraphs retain the host's spacing");
+    assert.equal(preview.querySelector("li br")!.nextSibling!.textContent, "continued\n");
+    assert.equal(preview.querySelector("pre code")!.textContent, "a\n\nb\n");
+    assert.equal(dom.window.getComputedStyle(preview.querySelector("pre code")!).whiteSpace, "pre-wrap");
+    const paragraph = document.createElement("p"); paragraph.className = "tb-markdown-source-paragraph";
+    paragraph.textContent = "one  two\nthree"; preview.append(paragraph);
+    assert.equal(dom.window.getComputedStyle(paragraph).whiteSpace, "pre-wrap");
+    assert.equal(dom.window.getComputedStyle(paragraph).marginBlock, "0");
+    preview.classList.add("is-markdown-pending");
+    assert.equal(dom.window.getComputedStyle(preview).whiteSpace, "pre-wrap", "the raw source shown before rendering still preserves whitespace");
+  } finally { root.remove(); hostStyle.remove(); style.remove(); }
 });
 function installObsidianTaskCheckboxDOM(states: () => boolean[]): () => void {
   const original = MarkdownRenderer.render;
@@ -2448,7 +2561,7 @@ test("[layout] numeric cells keep accessible labels without hover tooltip attrib
     cell.dispatchEvent(doubleClick);
     assert.equal(doubleClick.defaultPrevented, true);
     const input = cell.querySelector<HTMLInputElement>("input")!;
-    assert.equal(input.type, "number");
+    assert.equal(input.type, "text"); assert.equal(input.inputMode, "decimal");
     assert.equal(input.hasAttribute("aria-label"), false);
     assert.equal(input.hasAttribute("title"), false);
     const labelId = input.getAttribute("aria-labelledby");
@@ -2492,7 +2605,7 @@ test("[layout] Markdown editor keeps its preview inset and hides its vertical sc
   assert.equal(editor.paddingRight, "0px");
   const css = readFileSync("styles.css", "utf8");
   assert.match(css, /padding-block: calc\(var\(--tb-cell-base-padding, 6px\) \+ var\(--tb-cell-extra-space, 0px\) \/ 2\);/);
-  assert.match(css, /textarea\.tb-markdown-editor \{\s*--tb-cell-base-padding: 4px;/);
+  assert.equal(editor.getPropertyValue("--tb-cell-base-padding"), "4px");
   assert.equal(editor.overflowY, "hidden");
   dom.window.close();
 });
@@ -4660,7 +4773,7 @@ test("[interaction] number cells select on the first click and enter edit on the
     pointerClick(cell);
     let input = cell.querySelector<HTMLInputElement>("input.tb-number-editor");
     assert.ok(input, "the second click should open the number editor");
-    assert.equal(input.type, "number"); assert.equal(input.step, "any");
+    assert.equal(input.type, "text"); assert.equal(input.inputMode, "decimal");
     input.value = "12.5";
     const enter = new dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
     input.dispatchEvent(enter);
@@ -4677,6 +4790,217 @@ test("[interaction] number cells select on the first click and enter edit on the
     await settle();
     assert.equal(ui.saved()?.records[0].values[field.id], 12.5, "Escape should cancel the number edit");
   } finally { ui.cleanup(); }
+});
+test("[interaction][markdown] typing replaces selected text or numbers in a cancellable draft", async () => {
+  for (const type of ["text", "number"] as const) {
+    const table = fixture(); const field = table.fields[0]; field.type = type;
+    table.records.forEach((row) => { row.values[field.id] = type === "text" ? "Original" : 42; });
+    const ui = mount(table);
+    const cell = () => ui.root.querySelector<HTMLTableCellElement>(`td[data-field-id="${field.id}"]`)!;
+    const editor = () => cell().querySelector<HTMLInputElement | HTMLTextAreaElement>(".tb-cell-input")!;
+    const key = (target: Element, value: string, options: KeyboardEventInit = {}) => {
+      const event = new dom.window.KeyboardEvent("keydown", { key: value, bubbles: true, cancelable: true, ...options });
+      target.dispatchEvent(event); return event;
+    };
+    try {
+      pointerClick(cell());
+      const first = key(cell(), type === "text" ? "A" : "-");
+      assert.equal(first.defaultPrevented, true);
+      assert.equal(editor().value, type === "text" ? "A" : "-", "the first character replaces the old value exactly once");
+      assert.equal(document.activeElement, editor());
+      assert.equal(ui.saved(), null, "typing does not commit the draft");
+      key(editor(), "Escape");
+      assert.equal(ui.saved(), null, "Escape retains the original value");
+      for (const entry of ["Enter", " ", "dblclick"]) {
+        cell().focus();
+        if (entry === "dblclick") cell().dispatchEvent(new dom.window.MouseEvent("dblclick", { bubbles: true, cancelable: true, detail: 2 }));
+        else key(cell(), entry);
+        assert.equal(editor().value, type === "text" ? "Original" : "42", `${entry} preserves the old value`);
+        if (entry !== "dblclick") {
+          editor().dispatchEvent(new dom.window.KeyboardEvent("keyup", { key: entry, bubbles: true, cancelable: true }));
+          assert.ok(editor(), "releasing the opening key must leave the editor open");
+        }
+        key(editor(), "Escape");
+      }
+      pointerClick(cell()); key(cell(), type === "text" ? "😀" : ".");
+      assert.equal(editor().value, type === "text" ? "😀" : ".");
+      editor().value = type === "text" ? "😀 replacement" : "-.5";
+      key(editor(), "Enter"); await settle();
+      assert.equal(ui.saved()?.records[0].values[field.id], type === "text" ? "😀 replacement" : -0.5);
+    } finally { ui.cleanup(); }
+  }
+});
+test("[interaction] invalid numeric replacement drafts never clear or change the old number", async () => {
+  for (const draft of ["-", ".", "+", "1e", "not a number", " ", "0x20", "Infinity", "1e999"]) {
+    const table = fixture(); const field = table.fields[0]; field.type = "number";
+    table.records.forEach((row) => { row.values[field.id] = 42; });
+    const ui = mount(table);
+    try {
+      const cell = ui.root.querySelector<HTMLTableCellElement>("td.tb-cell")!; pointerClick(cell);
+      cell.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: draft[0], bubbles: true, cancelable: true }));
+      // Space opens an editor with the existing value; ordinary characters replace it.
+      const input = cell.querySelector<HTMLInputElement>(".tb-number-editor")!;
+      input.value = draft; input.blur(); await settle();
+      assert.equal(ui.saved(), null, `${draft}: invalid or incomplete input must preserve 42`);
+      assert.equal(cell.querySelector(".tb-number-preview")?.textContent, "42");
+    } finally { ui.cleanup(); }
+  }
+});
+test("[interaction] desktop cell focus starts native IME while preview mutations stay blocked", () => {
+  for (const mobile of [false, true]) {
+    Platform.isMobile = mobile;
+    const ui = mount();
+    try {
+      const cell = ui.root.querySelector<HTMLTableCellElement>("td.tb-cell")!;
+      assert.equal(cell.getAttribute("contenteditable"), mobile ? null : "plaintext-only");
+      const preview = cell.querySelector<HTMLElement>(".tb-markdown-content")!;
+      assert.equal(preview.getAttribute("contenteditable"), "false");
+      if (!mobile) {
+        pointerClick(preview);
+        assert.equal(document.activeElement, cell, "clicking the read-only preview must leave the cell ready for native IME input");
+        for (const inputType of ["insertText", "insertFromDrop", "deleteContentBackward", "insertParagraph"]) {
+          const event = new dom.window.InputEvent("beforeinput", { inputType, data: "unowned input", bubbles: true, cancelable: true });
+          cell.dispatchEvent(event);
+          assert.equal(event.defaultPrevented, true, inputType);
+        }
+        assert.equal(ui.saved(), null, "unowned native edits must never mutate stored values");
+      }
+    } finally { ui.cleanup(); Platform.isMobile = false; }
+  }
+});
+test("[interaction][layout] selected cells hide their caret and native IME drafts share the normal editor inset", () => {
+  const style = document.createElement("style"); style.textContent = readFileSync("styles.css", "utf8"); document.head.append(style);
+  try {
+    for (const types of [["text", "number"], ["number", "text"]] as const) {
+      const table = fixture();
+      table.fields = types.map((type, index) => ({ id: `value-${index}`, name: type, type, align: index ? "right" : "left" }));
+      table.records.forEach((row) => { row.values = { "value-0": types[0] === "text" ? "Original" : 42, "value-1": types[1] === "text" ? "Original" : 42 }; });
+      const ui = mount(table);
+      try {
+        for (const field of table.fields) {
+          const cell = ui.root.querySelector<HTMLTableCellElement>(`td[data-field-id="${field.id}"]`)!;
+          cell.focus();
+          assert.match(dom.window.getComputedStyle(cell).caretColor, /transparent|rgba\(0, 0, 0, 0\)/);
+          cell.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+          const editor = cell.querySelector<HTMLElement>(".tb-cell-input")!;
+          const editorStyle = dom.window.getComputedStyle(editor);
+          const wrapStyle = dom.window.getComputedStyle(editor.parentElement!);
+          const editorLayout = [editorStyle.paddingLeft, editorStyle.paddingRight, editorStyle.fontSize, editorStyle.lineHeight];
+          const wrapLayout = [wrapStyle.paddingLeft, wrapStyle.paddingRight, wrapStyle.paddingTop, wrapStyle.paddingBottom];
+          assert.doesNotMatch(editorStyle.caretColor, /transparent|rgba\(0, 0, 0, 0\)/);
+          editor.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+          cell.focus();
+          cell.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Process", keyCode: 229, bubbles: true, cancelable: true }));
+          const draft = cell.querySelector<HTMLElement>(".tb-cell-composition")!;
+          assert.ok(draft, "composition needs an editor surface inside the original focus target");
+          assert.equal(document.activeElement, cell);
+          assert.equal(document.getSelection()?.anchorNode, draft);
+          assert.equal(draft.style.textAlign, field.align);
+          const draftStyle = dom.window.getComputedStyle(draft);
+          const draftWrapStyle = dom.window.getComputedStyle(draft.parentElement!);
+          assert.deepEqual([draftStyle.paddingLeft, draftStyle.paddingRight, draftStyle.fontSize, draftStyle.lineHeight], editorLayout);
+          assert.deepEqual([draftWrapStyle.paddingLeft, draftWrapStyle.paddingRight, draftWrapStyle.paddingTop, draftWrapStyle.paddingBottom], wrapLayout);
+          assert.doesNotMatch(draftStyle.caretColor, /transparent|rgba\(0, 0, 0, 0\)/);
+          cell.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+          assert.equal(cell.querySelector(".tb-cell-composition"), null);
+          assert.match(dom.window.getComputedStyle(cell).caretColor, /transparent|rgba\(0, 0, 0, 0\)/);
+          assert.equal(ui.saved(), null);
+        }
+      } finally { ui.cleanup(); }
+    }
+  } finally { style.remove(); }
+});
+test("[interaction][markdown] IME startup keeps native focus through the first syllable before opening the editor", async () => {
+  for (const type of ["text", "number"] as const) for (const startup of [
+    { key: "Process", keyCode: 229 }, { key: "Unidentified", keyCode: 229 },
+    { key: "n", isComposing: true }, { key: "Dead" },
+  ]) {
+    const table = fixture(); const field = table.fields[0]; field.type = type;
+    table.records.forEach((row) => { row.values[field.id] = type === "text" ? "Original" : 42; });
+    const ui = mount(table);
+    try {
+      const cell = ui.root.querySelector<HTMLTableCellElement>("td.tb-cell")!; pointerClick(cell);
+      const start = new dom.window.KeyboardEvent("keydown", { ...startup, bubbles: true, cancelable: true });
+      cell.dispatchEvent(start);
+      assert.equal(cell.querySelector("input.tb-cell-input, textarea.tb-cell-input"), null);
+      assert.equal(cell.textContent, ""); assert.equal(document.activeElement, cell);
+      assert.equal(start.defaultPrevented, false, "the IME must receive its native first keystroke");
+      cell.dispatchEvent(new dom.window.CompositionEvent("compositionstart", { bubbles: true }));
+      // jsdom has no native IME: model the text on its original focus target.
+      cell.querySelector<HTMLElement>(".tb-cell-composition")!.textContent = type === "text" ? "中文" : "12.5";
+      const nativeInput = new dom.window.InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertCompositionText", isComposing: true });
+      cell.dispatchEvent(nativeInput); assert.equal(nativeInput.defaultPrevented, false);
+      cell.dispatchEvent(new dom.window.InputEvent("input", { bubbles: true, inputType: "insertCompositionText", isComposing: true }));
+      const candidate = new dom.window.KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true, cancelable: true });
+      cell.dispatchEvent(candidate);
+      assert.equal(candidate.defaultPrevented, false);
+      cell.dispatchEvent(new dom.window.CompositionEvent("compositionend", { bubbles: true, data: cell.textContent }));
+      await settle();
+      const input = cell.querySelector<HTMLInputElement | HTMLTextAreaElement>(".tb-cell-input")!;
+      assert.ok(input); assert.equal(input.value, type === "text" ? "中文" : "12.5");
+      input.dispatchEvent(new dom.window.KeyboardEvent("keyup", { key: "Enter", bubbles: true, cancelable: true }));
+      assert.equal(input.isConnected, true, "candidate-confirmation keyup must not save the cell");
+      assert.equal(ui.saved(), null);
+      input.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      await settle();
+      assert.equal(ui.saved()?.records[0].values[field.id], type === "text" ? "中文" : 12.5);
+    } finally { ui.cleanup(); }
+  }
+});
+test("[interaction] interrupted native composition restores the original preview without saving", async () => {
+  for (const end of ["escape", "blur", "destroy", "cancel"]) {
+    const ui = mount();
+    try {
+      const cell = ui.root.querySelector<HTMLTableCellElement>("td.tb-cell")!;
+      const original = cell.textContent;
+      pointerClick(cell);
+      cell.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Process", keyCode: 229, bubbles: true }));
+      cell.dispatchEvent(new dom.window.CompositionEvent("compositionstart", { bubbles: true }));
+      if (end === "escape") cell.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      else if (end === "blur") ui.root.querySelector<HTMLButtonElement>("button")!.focus();
+      else if (end === "destroy") ui.controller.destroy();
+      else cell.dispatchEvent(new dom.window.CompositionEvent("compositionend", { bubbles: true, data: "" }));
+      await settle();
+      assert.equal(cell.textContent, original, end);
+      assert.equal(ui.saved(), null, end);
+      assert.equal(cell.querySelector(".tb-cell-input"), null, end);
+    } finally { ui.cleanup(); }
+  }
+});
+test("[interaction] direct typing respects shortcuts, actual focus, controls, and field types", () => {
+  const ui = mount();
+  const other = mount();
+  try {
+    const cell = ui.root.querySelector<HTMLTableCellElement>("td.tb-cell")!;
+    pointerClick(cell);
+    for (const init of [
+      { key: "a", metaKey: true }, { key: "a", ctrlKey: true }, { key: "e", altKey: true },
+      { key: "ArrowDown" }, { key: "Tab" }, { key: "Shift" }, { key: "Escape" },
+    ]) {
+      cell.dispatchEvent(new dom.window.KeyboardEvent("keydown", { ...init, bubbles: true, cancelable: true }));
+      assert.equal(cell.querySelector(".tb-cell-input"), null);
+    }
+    const button = ui.root.querySelector<HTMLButtonElement>("button")!;
+    button.focus(); button.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "a", bubbles: true }));
+    assert.equal(cell.querySelector(".tb-cell-input"), null);
+    // A stale selected appearance is insufficient without actual cell focus.
+    cell.classList.add("is-cell-active");
+    cell.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "a", bubbles: true }));
+    assert.equal(cell.querySelector(".tb-cell-input"), null);
+    const choice = ui.root.querySelector<HTMLTableCellElement>(`td[data-field-id="${ui.table.fields[1].id}"]`)!;
+    pointerClick(choice); choice.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "a", bubbles: true }));
+    assert.equal(choice.querySelector(".tb-cell-input"), null);
+    const otherCell = other.root.querySelector<HTMLTableCellElement>("td.tb-cell")!;
+    pointerClick(otherCell);
+    otherCell.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "X", shiftKey: true, bubbles: true, cancelable: true }));
+    assert.equal(otherCell.querySelector<HTMLTextAreaElement>(".tb-cell-input")?.value, "X");
+    assert.equal(cell.querySelector(".tb-cell-input"), null, "typing belongs to only the focused table");
+    const input = otherCell.querySelector<HTMLTextAreaElement>(".tb-cell-input")!;
+    const next = new dom.window.KeyboardEvent("keydown", { key: "y", bubbles: true, cancelable: true });
+    input.dispatchEvent(next);
+    assert.equal(next.defaultPrevented, false, "subsequent input stays with the native editor");
+    assert.equal(input.value, "X", "jsdom does not insert the native second character");
+  } finally { ui.cleanup(); other.cleanup(); }
 });
 test("[interaction] Cmd/Ctrl+V pastes into selected text and number cells", async () => {
   const clipboardSource = mount();

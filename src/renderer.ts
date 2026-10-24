@@ -13,7 +13,7 @@ import { convertMarkdownTable, convertSmartTable } from "./import";
 import { convertSuperTableToMarkdown, createMarkdownExportFile } from "./markdown-export";
 import { captureRows, clipboardValues, linkEditorFields, parseWebLink, RowClipboard, moveRelative, serializeWebLink, valueFromLabel } from "./interaction";
 import { node as el, configMenuItem, control, icon, fieldIcon, menuAction, submenu, showMenu, promptForm, confirmDialog, FormField, PromptFormOptions } from "./ui";
-import { findMarkdownTaskMarkers, needsMarkdownRendering, safeMarkdownEmbeds, setMarkdownTaskState } from "./markdown";
+import { findMarkdownTaskMarkers, needsMarkdownRendering, normalizeMarkdownPreviewLineBreaks, safeMarkdownEmbeds, setMarkdownTaskState } from "./markdown";
 import { markdownPreviewCache } from "./markdown-preview";
 import { rememberedView, rememberView } from "./view-state";
 import { attachmentIcon, AttachmentCellController, renderAttachmentCell } from "./attachments";
@@ -902,7 +902,8 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
   let pointerDownHeaderWasActive = false;
   const cellActions = new WeakMap<HTMLTableCellElement, { render: () => HTMLElement[]; deactivate?: () => void; nodes?: HTMLElement[] }>();
   const textCellEditors = new WeakMap<HTMLTableCellElement, () => void>();
-  const cellEditors = new WeakMap<HTMLTableCellElement, () => void>();
+  const cellEditors = new WeakMap<HTMLTableCellElement, (initialValue?: string, openingKey?: string) => void>();
+  let cellComposition: { cell: HTMLTableCellElement; finish: (cancel?: boolean) => void } | undefined;
   const attachmentCells = new Map<HTMLTableCellElement, AttachmentCellController>();
   let pointerDownWillOpenAttachments = false;
   let lastPointerEditableCell: HTMLTableCellElement | null = null;
@@ -977,6 +978,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
   }
 
   function disposeTextEditors(): void {
+    cellComposition?.finish(true);
     [...textEditorDisposers].forEach((dispose) => dispose());
   }
 
@@ -1012,6 +1014,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
   }
 
   function clearCellActions(cell: HTMLTableCellElement): void {
+    if (cellComposition?.cell === cell) cellComposition.finish(true);
     const actions = cellActions.get(cell);
     if (!actions) return;
     actions.deactivate?.();
@@ -3355,6 +3358,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
       return;
     }
     const restoredPreview = markdownPreviews.restore(sourceText, content);
+    content.querySelectorAll("a").forEach((link) => link.setAttribute("contenteditable", "false"));
     if (!restoredPreview) {
       content.textContent = sourceText;
       content.classList.add("is-markdown-pending");
@@ -3367,6 +3371,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
       const rendered = el("div");
       void MarkdownRenderer.render(plugin.app, safeMarkdownEmbeds(sourceText), rendered, context.sourcePath, component).then(() => {
         if (destroyed || generation !== markdownGeneration || markdownComponents.get(cell) !== component || !cell.isConnected) return;
+        normalizeMarkdownPreviewLineBreaks(rendered, sourceText);
         rendered.querySelectorAll<HTMLImageElement>("img").forEach((image) => { image.loading = "lazy"; image.decoding = "async"; });
         const markers = findMarkdownTaskMarkers(sourceText);
         const taskInputs = [...rendered.querySelectorAll<HTMLInputElement>('input[type="checkbox"].task-list-item-checkbox')]
@@ -3409,6 +3414,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
           });
         }
         markdownPreviews.remember(sourceText, rendered);
+        rendered.querySelectorAll("a").forEach((link) => link.setAttribute("contenteditable", "false"));
         content.replaceChildren(...rendered.childNodes);
         content.classList.remove("is-markdown-pending");
         scheduleLayout(cell.closest("tr") ?? undefined);
@@ -3428,10 +3434,19 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     const cell = el("td", `tb-cell${first ? " tb-first-cell" : ""}`); cell.dataset.fieldId = field.id; cell.style.textAlign = field.align || "left";
     cell.dataset.focusKey = `cell-container:${row.id}:${field.id}`;
     cell.tabIndex = ["select", "status", "multiselect", "date", "datetime", "link", "attachment", "text", "number"].includes(field.type) ? 0 : -1;
+    if (!Platform.isMobile && (field.type === "text" || field.type === "number")) {
+      // An editable focus target lets macOS start the IME on the first key.
+      // All actual input belongs to the editor; the rendered preview is immutable.
+      cell.setAttribute("contenteditable", "plaintext-only");
+      cell.addEventListener("beforeinput", (event) => {
+        if (event.target === cell && cellComposition?.cell !== cell) event.preventDefault();
+      });
+    }
     cell.onkeydown = (event) => {
+      if (event.isComposing || event.keyCode === 229) return;
       if (event.target !== cell || (event.key !== "Enter" && event.key !== " ")) return;
       event.preventDefault(); activateCell(cell);
-      if (field.type === "text" || field.type === "number") { cellEditors.get(cell)?.(); return; }
+      if (field.type === "text" || field.type === "number") { cellEditors.get(cell)?.(undefined, event.key); return; }
       if (field.type === "attachment") { attachmentCells.get(cell)?.open(); return; }
       cell.querySelector<HTMLButtonElement>(".tb-cell-action")?.click();
     };
@@ -3496,7 +3511,10 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     if (field.type === "text") {
       const valueText = String(value ?? "");
       const wrap = el("div", "tb-markdown-cell");
-      const preview = el("div", `tb-markdown-content${valueText ? "" : " is-empty"}${/\r?\n/.test(valueText) ? " has-source-line-breaks" : ""}`);
+      const preview = el("div", `tb-markdown-content markdown-rendered${valueText ? "" : " is-empty"}${/\r?\n/.test(valueText) ? " has-source-line-breaks" : ""}`);
+      // Chromium forces pre-wrap inside plaintext-only editing hosts. Keep the
+      // preview outside that editing mode while the cell still accepts IME input.
+      preview.setAttribute("contenteditable", "false");
       preview.style.textAlign = field.align || "left";
       wrap.append(preview); cell.append(wrap);
       renderMarkdownPreview(row, field, valueText, cell, preview);
@@ -3532,19 +3550,32 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
         preview.hidden = false; editor.remove(); inputLabel?.remove(); inputLabel = null; wrap.classList.remove("is-editing"); cell.classList.remove("is-cell-editing");
         if (saveChanges && nextValue !== valueText) void save(nextValue);
       };
-      const beginEditing = () => {
+      const beginEditing = (initialValue = valueText, openingKey?: string) => {
         if (input) return;
         const entryHeight = cell.clientHeight;
         input = el("textarea", "tb-cell-input tb-markdown-editor tb-auto-height"); input.rows = 1;
-        input.value = valueText; input.style.textAlign = field.align || "left";
+        input.value = initialValue; input.style.textAlign = field.align || "left";
         input.dataset.focusKey = `cell:${row.id}:${field.id}`;
         inputLabel = hiddenAccessibleLabel(t("{name} value", { name: field.name }));
         input.setAttribute("aria-labelledby", inputLabel.id);
         input.oninput = () => scheduleLayout(cell.closest("tr") ?? undefined);
         input.onblur = () => finishEditing();
+        let composing = false;
+        let compositionKeyUp = false;
+        let openingKeyUp = openingKey;
+        input.addEventListener("compositionstart", () => { composing = true; });
+        input.addEventListener("compositionend", () => { composing = false; });
         editorKeyHandler = (event) => {
           if (event.target !== input) return;
-          if (event.isComposing || event.keyCode === 229) return;
+          // The Enter that opens the editor must not save it on release.
+          if (event.type === "keyup" && event.key === openingKeyUp) return;
+          if (event.type === "keydown") openingKeyUp = undefined;
+          if (event.type === "keyup" && compositionKeyUp) return;
+          if (composing || event.isComposing || event.keyCode === 229) {
+            if (event.type === "keydown") compositionKeyUp = true;
+            return;
+          }
+          if (event.type === "keydown") compositionKeyUp = false;
           const cancel = event.key === "Escape";
           const save = event.key === "Enter" && !event.shiftKey;
           if (!cancel && !save) return;
@@ -3567,7 +3598,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
         const editorHeight = Math.max(entryHeight, naturalHeight);
         input.style.height = `${editorHeight}px`;
         input.style.setProperty("--tb-cell-extra-space", `${editorHeight - naturalHeight}px`);
-        input.focus();
+        input.focus(); input.setSelectionRange(initialValue.length, initialValue.length);
       };
       textCellEditors.set(cell, beginEditing);
       cellEditors.set(cell, beginEditing);
@@ -3592,19 +3623,23 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
         preview.hidden = false; editor.remove(); inputLabel?.remove(); inputLabel = null; wrap.classList.remove("is-editing");
         if (nextValue !== valueText) {
           const number = nextValue === "" ? "" : Number(nextValue);
-          if (nextValue === "" || Number.isFinite(number)) void save(number);
+          if (nextValue === "" || /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(nextValue.trim()) && Number.isFinite(number)) void save(number);
         }
       };
-      const beginEditing = () => {
+      const beginEditing = (initialValue = valueText) => {
         if (input) return;
-        input = el("input", "tb-cell-input tb-number-editor"); input.type = "number"; input.step = "any";
-        input.value = valueText; input.style.textAlign = field.align || "left";
+        // Native number inputs erase partial signs and IME drafts before validation.
+        input = el("input", "tb-cell-input tb-number-editor"); input.type = "text"; input.inputMode = "decimal";
+        input.value = initialValue; input.style.textAlign = field.align || "left";
         input.dataset.focusKey = `cell:${row.id}:${field.id}`;
         inputLabel = hiddenAccessibleLabel(t("{name} value", { name: field.name }));
         input.setAttribute("aria-labelledby", inputLabel.id);
         input.onblur = finishEditing;
+        let composing = false;
+        input.addEventListener("compositionstart", () => { composing = true; });
+        input.addEventListener("compositionend", () => { composing = false; });
         input.onkeydown = (event) => {
-          if (event.isComposing || event.keyCode === 229) return;
+          if (composing || event.isComposing || event.keyCode === 229) return;
           if (event.key === "Escape") {
             event.preventDefault(); event.stopPropagation(); cancelled = true; input?.blur();
           } else if (event.key === "Enter") {
@@ -3612,7 +3647,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
           }
         };
         preview.hidden = true; wrap.classList.add("is-editing"); wrap.append(input, inputLabel);
-        input.focus();
+        input.focus(); input.setSelectionRange(initialValue.length, initialValue.length);
       };
       cellEditors.set(cell, beginEditing);
       registerCellActions(cell, () => [], finishEditing);
@@ -3935,10 +3970,12 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
 
   const isTextControl = (target: EventTarget | null) => {
     if (!(target instanceof Element)) return false;
+    if (cellComposition?.cell.contains(target)) return true;
     const control = target.closest("input, textarea, select, [contenteditable='true']");
     return !!control && root.contains(control);
   };
   const activeCellPasteSelection = () => {
+    if (cellComposition) return undefined;
     if (!activeCell || !activeCellElement?.isConnected || !activeCellElement.classList.contains("is-cell-active")) return undefined;
     const field = table.fields.find((item) => item.id === activeCell!.fieldId);
     const row = table.records.find((item) => item.id === activeCell!.rowId);
@@ -4028,6 +4065,79 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
       if (record) record.values[field.id] = emptyValue;
     }, { rowId: row.id, fieldId: field.id });
   };
+  const typeIntoFocusedCell = (event: KeyboardEvent) => {
+    const cell = activeCellElement;
+    if (cellComposition?.cell === cell && event.target === cell) {
+      event.stopImmediatePropagation();
+      if (event.key === "Escape" && !event.isComposing && event.keyCode !== 229) {
+        event.preventDefault(); cellComposition.finish(true);
+      }
+      return;
+    }
+    if (event.defaultPrevented || !cell?.isConnected || event.target !== cell ||
+        root.ownerDocument.activeElement !== cell || !cell.classList.contains("is-cell-active") || hasOpenTablePopup()) return;
+    const edit = cellEditors.get(cell);
+    if (!edit || event.metaKey || (event.ctrlKey || event.altKey) && !event.getModifierState("AltGraph")) return;
+    const composition = event.isComposing || event.keyCode === 229 || event.key === "Process" || event.key === "Dead";
+    if (!composition && (event.key === " " || [...event.key].length !== 1)) return;
+    event.stopImmediatePropagation();
+    if (composition && cell.getAttribute("contenteditable") === "plaintext-only") {
+      startCellComposition(cell, edit);
+    } else {
+      if (!composition) event.preventDefault();
+      edit(composition ? "" : event.key);
+    }
+  };
+  function startCellComposition(cell: HTMLTableCellElement, edit: (value?: string, openingKey?: string) => void): void {
+    cellComposition?.finish(true);
+    const entryHeight = cell.clientHeight;
+    const previewNodes = [...cell.childNodes];
+    const text = textCellEditors.has(cell);
+    const wrap = el("div", `${text ? "tb-markdown-cell" : "tb-number-cell"} is-editing`);
+    const draft = el("div", `tb-cell-input tb-cell-composition${text ? " tb-markdown-editor" : ""}`);
+    draft.style.textAlign = cell.style.textAlign;
+    // Measure an empty line, as the textarea does before any IME text exists.
+    draft.append(el("br")); wrap.append(draft);
+    let composing = false;
+    let frame: number | undefined;
+    const win = cell.ownerDocument.defaultView;
+    const finish = (cancel = false) => {
+      if (cellComposition?.cell !== cell) return;
+      cellComposition = undefined;
+      if (frame !== undefined) win?.clearTimeout(frame);
+      cell.removeEventListener("compositionstart", start);
+      cell.removeEventListener("compositionend", end);
+      cell.removeEventListener("input", input);
+      cell.removeEventListener("blur", blur);
+      const value = cell.textContent ?? "";
+      cell.replaceChildren(...previewNodes); cell.classList.remove("is-cell-editing");
+      if (!cancel && value && !destroyed && cell.isConnected && cell.ownerDocument.activeElement === cell) edit(value, "Enter");
+    };
+    const scheduleFinish = () => { if (frame === undefined) frame = win?.setTimeout(() => finish(), 0); };
+    const start = () => { composing = true; };
+    const end = () => { composing = false; scheduleFinish(); };
+    const input = (event: Event) => {
+      if (!composing && !("isComposing" in event && event.isComposing)) scheduleFinish();
+    };
+    const blur = () => finish(true);
+    cellComposition = { cell, finish };
+    // Keep the native composition on the same focus target. Moving to a new
+    // textarea mid-key loses the first syllable on macOS.
+    cell.replaceChildren(wrap); cell.classList.add("is-cell-editing");
+    if (text) {
+      const naturalHeight = draft.scrollHeight;
+      const editorHeight = Math.max(entryHeight, naturalHeight);
+      draft.style.height = `${editorHeight}px`;
+      draft.style.setProperty("--tb-cell-extra-space", `${editorHeight - naturalHeight}px`);
+    }
+    const selection = cell.ownerDocument.getSelection();
+    const range = cell.ownerDocument.createRange(); range.selectNodeContents(draft); range.collapse(true);
+    selection?.removeAllRanges(); selection?.addRange(range);
+    cell.addEventListener("compositionstart", start);
+    cell.addEventListener("compositionend", end);
+    cell.addEventListener("input", input);
+    cell.addEventListener("blur", blur);
+  }
   const applyEditorHistory = (view: MarkdownView, isUndo: boolean) => {
     const doc = root.ownerDocument;
     const editorHost = root.closest(".cm-editor") ?? view.containerEl;
@@ -4053,6 +4163,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     }
   };
   const keys = (event: KeyboardEvent) => {
+    if (event.target instanceof Node && cellComposition?.cell.contains(event.target)) { event.stopPropagation(); return; }
     if (event.defaultPrevented) return;
     const key = event.key.toLowerCase();
     const modifier = event.metaKey || event.ctrlKey;
@@ -4102,6 +4213,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     // the OS clipboard still contains the internally copied rows.
   };
   const onWindowShortcutSuppression = (event: KeyboardEvent) => {
+    if (event.target instanceof Node && cellComposition?.cell.contains(event.target)) return;
     const key = event.key.toLowerCase();
     const isHistoryShortcut = (event.metaKey || event.ctrlKey) && !event.altKey &&
       (key === "z" || event.ctrlKey && key === "y");
@@ -4489,6 +4601,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
   root.ownerDocument.addEventListener("focusin", onDocumentFocusIn, true);
   root.ownerDocument.addEventListener("focusout", onDocumentFocusOut, true);
   root.ownerDocument.addEventListener("dblclick", editCellOnDoubleClick, true);
+  root.ownerDocument.defaultView?.addEventListener("keydown", typeIntoFocusedCell, true);
   root.ownerDocument.defaultView?.addEventListener("keydown", clearFocusedCell, true);
   root.ownerDocument.defaultView?.addEventListener("keydown", onWindowShortcutSuppression, true);
   root.addEventListener("click", selectCell, true); root.addEventListener("focusin", selectCell);
@@ -4584,6 +4697,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     root.ownerDocument.removeEventListener("focusin", onDocumentFocusIn, true);
     root.ownerDocument.removeEventListener("focusout", onDocumentFocusOut, true);
     root.ownerDocument.removeEventListener("dblclick", editCellOnDoubleClick, true);
+    root.ownerDocument.defaultView?.removeEventListener("keydown", typeIntoFocusedCell, true);
     root.ownerDocument.defaultView?.removeEventListener("keydown", clearFocusedCell, true);
     root.ownerDocument.defaultView?.removeEventListener("keydown", onWindowShortcutSuppression, true);
     root.removeEventListener("scroll", onRootScroll, true); root.removeEventListener("keydown", keys);
