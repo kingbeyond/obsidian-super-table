@@ -7,6 +7,7 @@ import { confirmMarkdownReplacement, renderTable, showImportPreview } from "./re
 import { tableEditorExtension } from "./editor";
 import { DEFAULT_SETTINGS, normalizeSuperTableSettings, SuperTableSettings } from "./settings";
 import { convertSuperTableToMarkdown } from "./markdown-export";
+import { prepareTablePaste } from "./table-copy";
 
 interface EditorBlock {
   start: number;
@@ -196,6 +197,26 @@ export default class SuperTablePlugin extends Plugin {
         }
       },
     });
+
+    this.registerEvent(this.app.workspace.on("editor-paste", (event, editor) => {
+      if (event.defaultPrevented || !event.clipboardData) return;
+      const target = event.target instanceof Element ? event.target : null;
+      const active = target?.ownerDocument.activeElement;
+      const editable = target?.closest("[contenteditable='true']");
+      if (target?.closest(".tablebase-root, input, textarea, select")
+        || active?.closest(".tablebase-root, input, textarea, select")
+        || editable && !editable.classList.contains("cm-content")) return;
+      const selections = editor.listSelections();
+      if (selections.length !== 1) return;
+      const selection = selections[0];
+      const anchor = editor.posToOffset(selection.anchor);
+      const head = editor.posToOffset(selection.head);
+      const replacement = prepareTablePaste(editor.getValue(), event.clipboardData.getData("text/plain"), Math.min(anchor, head), Math.max(anchor, head));
+      if (replacement === null) return;
+      event.preventDefault();
+      // Match the host paste origin so rapid consecutive copies undo separately.
+      editor.replaceSelection(replacement, "input.paste");
+    }));
 
     this.registerEvent(this.app.workspace.on("editor-menu", (menu: Menu, editor) => {
       const smart = findBlockAtCursor(editor, ["smart-table"]);

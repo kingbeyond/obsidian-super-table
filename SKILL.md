@@ -48,6 +48,8 @@ Keep each record on one physical line, with line breaks between records. Keep fi
 
 Use fresh nonempty IDs for new objects, for example a type prefix plus a random UUID. Table IDs must be unique within a note. Field IDs, record IDs, and view IDs must each be unique within their table; option IDs must be unique within their field. Duplicating an entire table in the same note requires a new `tableId`; its internal IDs may remain because their scope is the table.
 
+The UI's **Table actions → Copy table** creates a new `tableId`, preserves all fields, records, views and unknown properties, and sets the copy's `defaultViewId` to the view currently displayed. Attachments keep their existing Vault paths. Ordinary note-body pastes of complete, valid table blocks replace only conflicting top-level table IDs; existing tables and internal references are unchanged. This protection does not run for direct file edits, code-block-internal or partial pastes, invalid data, or multiple editor selections. When editing files with AI, always ensure IDs are unique yourself; do not rely on UI paste handling or expect existing duplicates to be repaired automatically.
+
 The plugin rejects duplicate field, record, or view IDs within a table, and duplicate option IDs within a field, when reading the table. It disables table editing and preserves the raw data instead of automatically replacing IDs or deleting duplicates. An option ID may be reused in different fields. Names and labels are separate from IDs; this check does not enforce their uniqueness. If duplicates already exist, report them and preserve the source unless repair is requested; do not guess which duplicate an existing reference was intended to identify.
 
 ### Cell values

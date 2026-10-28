@@ -8,10 +8,11 @@ import {
   FIELD_TYPES, Field, FieldType, filterAndSortRows, formatDateValue, groupRows, makeId, newField, parseDateEditorValue,
   nextOptionColor, OPTION_COLORS, RecordRow, SelectOption, TableDocument, TableView, viewUsesFieldForProjection,
 } from "./model";
-import { applyReadingViewTableHistory, clearRecentReadingViewTableWrite, hasRecentReadingViewTableWrite, hasReadingViewTableHistory, markRecentReadingViewTableWrite, persistTable, readTable, showSaveError } from "./storage";
+import { applyReadingViewTableHistory, clearRecentReadingViewTableWrite, hasRecentReadingViewTableWrite, hasReadingViewTableHistory, markRecentReadingViewTableWrite, persistTable, readTable, serializeTable, showSaveError } from "./storage";
 import { convertMarkdownTable, convertSmartTable } from "./import";
 import { convertSuperTableToMarkdown, createMarkdownExportFile } from "./markdown-export";
 import { captureRows, clipboardValues, linkEditorFields, parseWebLink, RowClipboard, moveRelative, serializeWebLink, valueFromLabel } from "./interaction";
+import { copyTableDocument } from "./table-copy";
 import { node as el, configMenuItem, control, icon, fieldIcon, menuAction, submenu, showMenu, promptForm, confirmDialog, FormField, PromptFormOptions } from "./ui";
 import { findMarkdownTaskMarkers, needsMarkdownRendering, normalizeMarkdownPreviewLineBreaks, safeMarkdownEmbeds, setMarkdownTaskState } from "./markdown";
 import { markdownPreviewCache } from "./markdown-preview";
@@ -1033,8 +1034,10 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     showMenu(menu, anchor, event, () => { openTableMenus.delete(menu); onHide?.(); });
   }
 
-  function openExportMenu(anchor: HTMLElement, event: MouseEvent): void {
+  function openTableActionsMenu(anchor: HTMLElement, event: MouseEvent): void {
     const menu = new Menu().setUseNativeMenu(false);
+    menuAction(menu, t("Copy table"), "copy", copyWholeTable);
+    menu.addSeparator();
     const addScopes = (child: Menu, exportFormat: (scope: ExportScope) => void) => {
       child.setUseNativeMenu(false);
       menuAction(child, t("Current view"), "eye", () => exportFormat("current"));
@@ -1049,7 +1052,8 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
       menuAction(child, t("Copy current view"), "clipboard-copy", () => copyMarkdown("current"));
       menuAction(child, t("Copy all fields and records"), "clipboard-copy", () => copyMarkdown("all"));
     }, trackTableMenu);
-    showTableMenu(menu, anchor, event);
+    anchor.setAttribute("aria-expanded", "true");
+    showTableMenu(menu, anchor, event, () => anchor.setAttribute("aria-expanded", "false"));
   }
 
   function choiceButtonForCell(rowId: string, fieldId: string): HTMLButtonElement | null {
@@ -1598,7 +1602,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     const viewName = el("span", "tb-view-name", view.name);
     viewName.id = makeId("tb-view-name");
     viewButton.setAttribute("aria-labelledby", viewName.id);
-    viewButton.append(icon("table", "tb-control-icon tb-view-type-icon"), viewName, icon("ellipsis", "tb-control-icon tb-view-menu-icon"));
+    viewButton.append(icon("table", "tb-control-icon tb-view-type-icon"), viewName, icon("chevron-down", "tb-control-icon tb-view-menu-icon"));
     viewButton.onclick = (event) => openViewMenu(viewButton, event);
     toolbar.append(viewButton);
     const displayConfiguration = toolbarButton(toolbar, t("Display configuration"), "eye", () => openDisplayConfig(displayConfiguration));
@@ -1631,8 +1635,6 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
       search.open = true; render(); root.querySelector<HTMLInputElement>(".tb-search-input")?.focus({ preventScroll: true });
     }, search.open);
     searchButton.classList.add("tb-search-toggle"); searchButton.setAttribute("aria-expanded", String(search.open));
-    const exportButton = toolbarButton(toolbar, t("Export"), "file-output", (event) => openExportMenu(exportButton, event));
-    exportButton.setAttribute("aria-haspopup", "menu");
     if (rowClipboard?.rows.length) toolbarButton(toolbar, t(rowClipboard.rows.length === 1 ? "Paste {count} row" : "Paste {count} rows", { count: rowClipboard.rows.length }), "clipboard-paste", () => pasteInternal(false));
     toolbarButton(toolbar, t("Select"), "check-square", () => {
       selectionMode = !selectionMode; if (!selectionMode) selectedRows.clear(); render();
@@ -1640,7 +1642,14 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
       if (wrap) wrap.scrollLeft = Math.max(0, scroll.left + (selectionMode ? 42 : -42));
     }, selectionMode);
     const count = projection().rows.length;
-    toolbar.append(el("span", "tb-count", t("{visible} of {total}", { visible: count, total: table.records.length })));
+    const tableActions = el("div", "tb-table-actions");
+    tableActions.append(el("span", "tb-count", t("{visible} of {total}", { visible: count, total: table.records.length })));
+    const more = control("", "ellipsis", "tb-table-menu-button");
+    const moreLabel = hiddenAccessibleLabel(t("Table actions")); more.append(moreLabel);
+    more.setAttribute("aria-labelledby", moreLabel.id); more.removeAttribute("aria-label");
+    more.setAttribute("aria-haspopup", "menu"); more.setAttribute("aria-expanded", "false");
+    more.onclick = (event) => openTableActionsMenu(more, event);
+    tableActions.append(more); toolbar.append(tableActions);
     if (search.open) renderSearchBar(toolbar);
     shell.append(toolbar);
     if (selectionMode) shell.append(renderSelectionBar());
@@ -3140,6 +3149,17 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     });
   }
 
+  async function copyWholeTable(): Promise<void> {
+    const viewId = currentView().id;
+    try {
+      if (await saveQueue === false) throw new Error(t("Could not save. Your changes have not been applied."));
+      await writeClipboard(`${serializeTable(copyTableDocument(table, viewId))}\n\n`);
+      new Notice(t("Table copied. Paste it into a note to create an independent copy."));
+    } catch (error) {
+      new Notice(t("Could not copy table: {message}", { message: errorMessage(error) }), 8000);
+    }
+  }
+
   async function copyMarkdown(scope: ExportScope): Promise<void> {
     try {
       const { fields, rows } = exportData(scope);
@@ -3520,11 +3540,6 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
       renderMarkdownPreview(row, field, valueText, cell, preview);
       let input: HTMLTextAreaElement | null = null;
       let inputLabel: HTMLSpanElement | null = null;
-      preview.onmousedown = (event) => {
-        const target = event.target;
-        if (input || event.detail <= 1 || (target instanceof Element && target.closest("input,textarea,select,button,[contenteditable='true']"))) return;
-        event.preventDefault();
-      };
       let editorKeyHandler: ((event: KeyboardEvent) => void) | null = null;
       let editorWindow: Window | null = null;
       let disposeEditing: (() => void) | null = null;
@@ -4405,6 +4420,14 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     const interactiveElement = target.closest(selector);
     return !!interactiveElement && cell.contains(interactiveElement);
   };
+  const preventCellPreviewSelection = (event: MouseEvent) => {
+    if (event.button !== 0 || event.detail <= 1 || !(event.target instanceof Element)) return;
+    const cell = event.target.closest<HTMLTableCellElement>("td.tb-cell");
+    if (!cell || !root.contains(cell) || !cellEditors.has(cell) || isCellControlTarget(cell, event.target)) return;
+    // Chromium's multi-click selection can focus a preceding editable cell before
+    // click opens our editor. Cover cell padding too, while retaining input selection.
+    event.preventDefault();
+  };
   const onDocumentPointerDown = (event: PointerEvent) => {
     pointerDownWasCellControl = false;
     const target = event.target;
@@ -4601,6 +4624,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
   root.ownerDocument.addEventListener("focusin", onDocumentFocusIn, true);
   root.ownerDocument.addEventListener("focusout", onDocumentFocusOut, true);
   root.ownerDocument.addEventListener("dblclick", editCellOnDoubleClick, true);
+  root.addEventListener("mousedown", preventCellPreviewSelection, true);
   root.ownerDocument.defaultView?.addEventListener("keydown", typeIntoFocusedCell, true);
   root.ownerDocument.defaultView?.addEventListener("keydown", clearFocusedCell, true);
   root.ownerDocument.defaultView?.addEventListener("keydown", onWindowShortcutSuppression, true);
@@ -4697,6 +4721,7 @@ export function renderTable(plugin: Plugin, source: string, context: RenderConte
     root.ownerDocument.removeEventListener("focusin", onDocumentFocusIn, true);
     root.ownerDocument.removeEventListener("focusout", onDocumentFocusOut, true);
     root.ownerDocument.removeEventListener("dblclick", editCellOnDoubleClick, true);
+    root.removeEventListener("mousedown", preventCellPreviewSelection, true);
     root.ownerDocument.defaultView?.removeEventListener("keydown", typeIntoFocusedCell, true);
     root.ownerDocument.defaultView?.removeEventListener("keydown", clearFocusedCell, true);
     root.ownerDocument.defaultView?.removeEventListener("keydown", onWindowShortcutSuppression, true);

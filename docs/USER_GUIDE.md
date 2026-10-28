@@ -107,6 +107,16 @@ Choose **Select** to copy, duplicate, delete, or export records in bulk.
 
 Copied cells take priority over selected rows. Shortcut pasting a copied single row asks for confirmation before replacing the current row; use **Paste N rows** for multiple rows. Copied records use the original attachments without duplicating files.
 
+## Copying a whole table
+
+Choose **… (Table actions) → Copy table** at the far right of the table toolbar. In edit mode in the same or another note, place the cursor in the note body outside code blocks and press `Cmd/Ctrl+V`.
+
+The independent copy includes every field, record, and view, including hidden fields and filtered-out records. It initially opens the view displayed when copied. Attachments reference the original Vault files without duplicating them.
+
+Copying generates a new table ID. When complete, valid Super Table blocks are pasted into the note body, the plugin also replaces IDs that conflict with the destination note or other pasted tables, allowing repeated pastes. This also works when manually copying whole code blocks. Cut moves and complete-block replacements keep IDs when there is no conflict.
+
+Pasting inside code blocks, incomplete or invalid data, and multiple-cursor pastes do not adjust table IDs. Existing duplicate IDs are not repaired automatically. Relative links in text cells resolve from the destination note, so check them after copying between folders. When copying between Vaults, also transfer attachments separately.
+
 ## Views, filters, sorting, and grouping
 
 ### Managing views
@@ -165,7 +175,7 @@ Smart Table import is one-way, with status columns converted to single select. I
 
 ### Exporting as Markdown
 
-Choose **Export → Export Markdown** to save a file or copy to the clipboard:
+Choose **… (Table actions) → Export Markdown** at the far right of the toolbar to save a file or copy to the clipboard:
 
 - **Current view**: Visible fields and filtered records in the current sort and group order.
 - **All fields and records**: Every field and record in stored order, independent of the current view.
@@ -178,7 +188,7 @@ When upgrading from 1.0.3 or earlier to 1.0.4 or later, reassign any custom hotk
 
 ### Exporting CSV
 
-Choose **Export → Export CSV**, using the same scopes as Markdown. In row selection mode, **Export** includes only selected records and currently visible fields. Attachments use JSON path arrays, such as `["Attachments/image.png","Attachments/notes.pdf"]`.
+Choose **… (Table actions) → Export CSV** at the far right of the toolbar, using the same scopes as Markdown. In row selection mode, **Export** includes only selected records and currently visible fields. Attachments use JSON path arrays, such as `["Attachments/image.png","Attachments/notes.pdf"]`.
 
 ## Interface language
 

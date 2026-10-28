@@ -1,6 +1,10 @@
 import type { MessageKey } from "./en";
 
 export const zhCN: Record<MessageKey, string> = {
+  "Table actions": "表格操作",
+  "Copy table": "复制表格",
+  "Table copied. Paste it into a note to create an independent copy.": "表格已复制，粘贴到笔记中即可创建独立副本。",
+  "Could not copy table: {message}": "无法复制表格：{message}",
   "Search": "搜索",
   "Search current view": "搜索当前视图",
   "Search cells…": "搜索单元格…",

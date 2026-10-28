@@ -1,5 +1,9 @@
 // English messages are also the stable translation keys.
 export const en = {
+  "Table actions": "Table actions",
+  "Copy table": "Copy table",
+  "Table copied. Paste it into a note to create an independent copy.": "Table copied. Paste it into a note to create an independent copy.",
+  "Could not copy table: {message}": "Could not copy table: {message}",
   "Search": "Search",
   "Search current view": "Search current view",
   "Search cells…": "Search cells…",

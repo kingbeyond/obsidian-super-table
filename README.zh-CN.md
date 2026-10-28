@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Super Table 在 Obsidian 笔记中提供可编辑的数据表，支持类型化字段、筛选、排序、分组和多个视图。表格数据与视图配置直接保存在当前 Markdown 笔记中。
+Super Table 在 Obsidian 笔记中提供类似 Notion 数据库的可编辑表格，支持类型化字段、筛选、排序、分组和多个视图。表格数据与视图配置直接保存在当前 Markdown 笔记中。
 
 ![Super Table 示例：发布计划、类型化字段和多个视图](docs/images/overview.png)
 

@@ -10,6 +10,8 @@ const tableCellSave = Annotation.define<{ path: string; tableId: string }>();
 
 class TableWidget extends WidgetType {
   controller?: TableController;
+  private measuredHeight = -1;
+  get estimatedHeight(): number { return this.measuredHeight; }
   constructor(readonly plugin: Plugin, public body: string, readonly path: string, readonly id: string,
     readonly locateEmpty: (view: EditorView, id: string) => FencedBlock | undefined, readonly emptyTable?: TableDocument) { super(); }
   eq(other: TableWidget): boolean { return this.body === other.body && this.path === other.path && this.id === other.id; }
@@ -40,6 +42,10 @@ class TableWidget extends WidgetType {
         if (markdownView?.file?.path !== this.path) throw new Error(t("The source note is no longer available."));
         this.body = json;
         try {
+          // A document change rebuilds CodeMirror's height map before DOM measurement.
+          // Without this estimate, a tall table can shrink to one line and leave the viewport.
+          const height = root.offsetHeight;
+          if (height > 0) this.measuredHeight = height;
           // The renderer owns viewport preservation across this transaction and
           // layout. Restoring the raw editor offset here would override its cell anchor.
           view.dispatch({

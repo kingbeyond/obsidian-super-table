@@ -23,6 +23,7 @@ import SuperTablePlugin from "../src/main";
 import { tableEditorExtension } from "../src/editor";
 import { cancelViewportRestorations, registerViewportRestoration } from "../src/viewport";
 import { promptForm } from "../src/ui";
+import { copyTableDocument, prepareTablePaste } from "../src/table-copy";
 import { editorInfoField, editorLivePreviewField, shownMenus, notices, markdownRenderCalls, MarkdownRenderer, Menu, Platform, TFile, setObsidianLanguage, setObsidianLanguageFailure, installObsidianDomHelpers } from "./obsidian-stub";
 
 const old = {
@@ -401,6 +402,81 @@ test("[storage] safe block replacement preserves surrounding content and rejects
   assert.throws(() => replaceTableBlockInText(note, table.tableId, "stale", ""), /changed elsewhere/);
   assert.throws(() => replaceTableBlockInText(`${note}\n${serializeTable(table)}`, table.tableId, source, ""), /same table ID/);
 });
+test("[table-block][data-format] whole-table copy changes only table identity and initial view, preserving opaque data and references", () => {
+  const table = readTable(JSON.stringify(fixtureWithOpaqueData()));
+  table.views.push({ id: "second-view", name: "Another", filters: emptyFilters() });
+  table.fields.push({ id: "attachments", name: "Files", type: "attachment" });
+  table.records[0].values.attachments = ["Assets/shared.png"];
+  const original = JSON.stringify(table);
+  const first = copyTableDocument(table, "second-view");
+  const second = copyTableDocument(table, "second-view");
+  assert.notEqual(first.tableId, table.tableId);
+  assert.notEqual(first.tableId, second.tableId);
+  assert.equal(first.defaultViewId, "second-view");
+  assert.deepEqual({ ...first, tableId: table.tableId, defaultViewId: table.defaultViewId }, table);
+  first.records[0].values.attachments = [];
+  assert.equal(JSON.stringify(table), original, "copies must not share nested objects with the source");
+});
+test("[table-block][storage] whole-table paste handles same-note, cross-note, repeated and multi-table collisions", () => {
+  const table = fixture(); const source = serializeTable(table);
+  const note = `${source}\n\n`;
+  assert.equal(prepareTablePaste("", source, 0, 0), null, "cross-note paste without a collision stays with the host");
+  const first = prepareTablePaste(note, source, note.length, note.length)!;
+  assert.ok(first);
+  const firstTable = readTable(scanFencedBlocks(first)[0].body);
+  assert.notEqual(firstTable.tableId, table.tableId);
+  assert.deepEqual({ ...firstTable, tableId: table.tableId }, readTable(scanFencedBlocks(source)[0].body));
+  const after = note + first + "\n\n";
+  const repeated = prepareTablePaste(after, first, after.length, after.length)!;
+  const repeatedTable = readTable(scanFencedBlocks(repeated)[0].body);
+  assert.notEqual(repeatedTable.tableId, firstTable.tableId);
+  const batch = prepareTablePaste("", `${source}\n\n${source}\n\n${source}`, 0, 0)!;
+  const ids = scanFencedBlocks(batch).map((block) => readTable(block.body).tableId);
+  assert.equal(ids[0], table.tableId);
+  assert.equal(new Set(ids).size, 3);
+  assert.equal(note, `${source}\n\n`, "the existing note is never rewritten");
+});
+test("[table-block][storage] pasted table ID replacement preserves raw JSON, nested IDs, fences, indentation, CRLF and surrounding prose", () => {
+  const table = fixtureWithOpaqueData();
+  table.extraTable = { tableId: table.tableId, text: 'quoted "tableId": and } [ brackets' };
+  const body = JSON.stringify(table, null, 3).replace('"tableId":', '"ta\\u0062leId":');
+  const source = `before\r\n\r\n  ~~~~super-table\r\n${body.split("\n").map((line) => `  ${line}`).join("\r\n")}\r\n  ~~~~\r\n\r\nafter`;
+  const note = serializeTable(table) + "\n\n";
+  const output = prepareTablePaste(note, source, note.length, note.length)!;
+  const copied = readTable(scanFencedBlocks(output)[0].body);
+  assert.equal(output.replace(JSON.stringify(copied.tableId), JSON.stringify(table.tableId)), source);
+  assert.deepEqual(copied.extraTable, table.extraTable);
+});
+test("[table-block][storage] paste preserves IDs for complete replacement and cut moves but never transforms partial or nested code", () => {
+  const source = serializeTable(fixture());
+  const note = `before\n${source}\nafter\n`;
+  const from = "before\n".length; const to = from + source.length;
+  assert.equal(prepareTablePaste(note, source, from, to), null);
+  const cutNote = "before\n\nafter\n";
+  assert.equal(prepareTablePaste(cutNote, source, cutNote.length, cutNote.length), null);
+  for (const [start, end] of [[from, from], [from + 20, from + 20], [from, to - 1], [from + 1, to], [to, to]]) {
+    assert.equal(prepareTablePaste(note, source, start, end), null, `${start}:${end}`);
+  }
+  const unclosed = note + "```text\n";
+  assert.equal(prepareTablePaste(unclosed, source, unclosed.length, unclosed.length), null);
+  const example = `\`\`\`\`markdown\n${source}\n\`\`\`\``;
+  assert.equal(prepareTablePaste(note, example, note.length, note.length), null);
+  assert.equal(prepareTablePaste(note, `~~~~markdown\n${source}`, note.length, note.length), null, "unclosed outer examples must remain text");
+  const remainingDuplicate = `${source}\n${source}\n`;
+  assert.ok(prepareTablePaste(remainingDuplicate, source, 0, source.length), "a second surviving table still requires a fresh ID");
+});
+test("[table-block][data-format] paste leaves incomplete, invalid and future-version data intact while repairing valid siblings", () => {
+  const table = fixture(); const source = serializeTable(table); const note = source + "\n\n";
+  const future = serializeTable({ ...table, schemaVersion: 999 } as any);
+  const invalid = '```super-table\n{"tableId":"invalid"}\n```';
+  for (const value of [source.slice(0, -3), "```super-table\n{\n```", "```super-table\n```", future, invalid]) {
+    assert.equal(prepareTablePaste(note, value, note.length, note.length), null);
+  }
+  const mixed = `${future}\n\n${source}`;
+  const result = prepareTablePaste("", mixed, 0, 0)!;
+  assert.ok(result.startsWith(future));
+  assert.notEqual(readTable(scanFencedBlocks(result)[1].body).tableId, table.tableId);
+});
 test("[storage] Markdown export inserts below or replaces the exact table block and rejects stale or ambiguous sources", () => {
   const table = fixture();
   const source = serializeTableBody(table);
@@ -736,10 +812,10 @@ const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "https
 Object.defineProperty(dom.window.HTMLElement.prototype, "setCssStyles", {
   value(this: HTMLElement, styles: Partial<CSSStyleDeclaration>) { Object.assign(this.style, styles); },
 });
-for (const name of ["window", "document", "Node", "HTMLElement", "Element", "HTMLInputElement", "HTMLTextAreaElement", "HTMLSpanElement", "MouseEvent", "KeyboardEvent", "DOMException", "File"])
+for (const name of ["window", "document", "Node", "HTMLElement", "Element", "HTMLInputElement", "HTMLTextAreaElement", "HTMLSpanElement", "MouseEvent", "KeyboardEvent", "DOMException", "File", "MutationObserver"])
   Object.defineProperty(globalThis, name, { configurable: true, value: (dom.window as any)[name] });
 Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
-Object.defineProperty(dom.window, "matchMedia", { configurable: true, value: () => ({ matches: true }) });
+Object.defineProperty(dom.window, "matchMedia", { configurable: true, value: () => ({ matches: true, addListener() {}, removeListener() {} }) });
 Object.defineProperty(dom.window.navigator, "clipboard", { configurable: true, value: { writeText: async () => {} } });
 const requestTestFrame = (callback: (timestamp: number) => void) => setTimeout(() => callback(dom.window.performance.now()), 0);
 const cancelTestFrame = (frame: number) => clearTimeout(frame);
@@ -1562,6 +1638,43 @@ test("[storage][table-block] live-preview save restores the CodeMirror scroll po
     assert.equal(readTable(scanFencedBlocks(state.doc.toString())[0].body).records[0].values[table.fields[0].id], "Saved while scrolled");
   } finally { widget.destroy(); root.remove(); scrollDOM.remove(); prototype.getBoundingClientRect = originalRect; }
 });
+test("[storage][table-block][layout] saving a lower-row choice keeps the tall widget in CodeMirror's height map", async () => {
+  const table = fixture(); delete table.views[0].sort; delete table.views[0].group;
+  table.records = Array.from({ length: 40 }, (_, index) => ({ id: `tall-${index}`, values: { ...table.records[0].values } }));
+  const parent = document.createElement("div"); document.body.append(parent);
+  const note = "before\n\n" + serializeTable(table) + "\n\n" + "after\n".repeat(80);
+  const blockFrom = note.indexOf("```super-table");
+  const extension = tableEditorExtension(livePreviewPlugin() as any);
+  let heightDuringSave = 0;
+  const editor = new EditorView({
+    state: EditorState.create({ doc: note, extensions: [editorInfoField, editorLivePreviewField, extension] }), parent,
+    dispatchTransactions(transactions, view) {
+      view.update(transactions);
+      heightDuringSave = view.lineBlockAt(blockFrom).height;
+    },
+  });
+  try {
+    const root = parent.querySelector<HTMLElement>(".tb-live-preview")!;
+    assert.ok(root);
+    let renderedHeight = 1985;
+    Object.defineProperty(root, "offsetHeight", { get: () => renderedHeight });
+    const choice = table.fields[1];
+    const chooseLastRow = async (label: string) => {
+      const cell = root.querySelector<HTMLElement>(`tr[data-row-id="tall-39"] td[data-field-id="${choice.id}"]`)!;
+      pointerClick(cell);
+      click(byLabel(cell, `Choose ${choice.name}`));
+      shownMenus.at(-1)!.items.find((item) => item.title === label)!.action!({});
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    };
+    await chooseLastRow("MAC");
+    assert.equal(heightDuringSave, 1985, "the transaction must not estimate a multi-screen table as one line before DOM measurement");
+    assert.strictEqual(parent.querySelector(".tb-live-preview"), root, "the existing table must remain rendered");
+    assert.equal(readTable(scanFencedBlocks(editor.state.doc.toString())[0].body).records[39].values[choice.id], choice.options![1].id);
+    renderedHeight = 2400;
+    await chooseLastRow("PC");
+    assert.equal(heightDuringSave, 2400, "subsequent saves use the current height after layout changes");
+  } finally { editor.destroy(); parent.remove(); }
+});
 test("[storage][views][layout] editing the sort field keeps its moved cell anchored after all editor save frames", async () => {
   const table = fixture(); delete table.views[0].group;
   table.views[0].sort = { fieldId: table.fields[0].id, direction: "asc" };
@@ -2231,7 +2344,9 @@ test("[layout] renderer has compact icon toolbar, type icons, plain pills and se
     const labelId = button.getAttribute("aria-labelledby");
     return !!labelId && !!document.getElementById(labelId)?.textContent?.trim();
   }), "toolbar buttons should retain accessible names through their visible labels");
-  assert.deepEqual([...ui.root.querySelectorAll(".tb-toolbar button:not(.tb-view-menu-button) span:not(:has(svg))")].map((element) => element.textContent), ["Display configuration", "Row", "Column", "Filter", "Group", "Search", "Export", "Select"]);
+  assert.deepEqual([...ui.root.querySelectorAll(".tb-toolbar button:not(.tb-view-menu-button) span:not(:has(svg)):not(.tb-sr-only)")].map((element) => element.textContent), ["Display configuration", "Row", "Column", "Filter", "Group", "Search", "Select"]);
+  assert.equal(ui.root.querySelector(".tb-view-menu-icon svg")?.getAttribute("data-icon"), "chevron-down");
+  assert.equal(ui.root.querySelector(".tb-table-actions")?.lastElementChild?.classList.contains("tb-table-menu-button"), true);
   assert.equal(ui.root.querySelectorAll(".tb-type-icon").length, 3);
   assert.equal(ui.root.querySelector(".tb-type-icon svg")?.getAttribute("data-icon"), "text");
   assert.equal(ui.root.querySelectorAll(".tb-tags .tb-tag").length, 4);
@@ -2240,21 +2355,21 @@ test("[layout] renderer has compact icon toolbar, type icons, plain pills and se
   assert.equal(ui.root.querySelector<HTMLTextAreaElement>(".tb-field-name")?.value, "名称");
   assert.equal(ui.root.querySelector<HTMLTableElement>(".tb-grid")?.style.width, "644px"); ui.cleanup();
 });
-test("[import-export][localization] export menu offers file and copy actions under the correct Markdown menu", () => {
+test("[import-export][localization] table actions menu groups whole-table copy and the existing export submenus", () => {
   const previousLocale = getLocale();
   try {
     for (const language of ["en", "zh-CN"]) {
       setLanguage(language);
       const ui = mount();
       try {
-        const exportButton = [...ui.root.querySelectorAll<HTMLButtonElement>(".tb-toolbar button")]
-          .find((button) => button.textContent?.includes(t("Export")))!;
+        const exportButton = ui.root.querySelector<HTMLButtonElement>(".tb-table-menu-button")!;
         click(exportButton);
         const menu = shownMenus.at(-1)!;
         assert.equal(menu.useNativeMenu, false);
-        assert.deepEqual(menu.items.map((item) => item.title), [t("Export CSV"), t("Export Markdown")]);
-        const csvMenu = menu.items[0].child!;
-        const markdownMenu = menu.items[1].child!;
+        assert.deepEqual(menu.items.map((item) => item.title), [t("Copy table"), t("Export CSV"), t("Export Markdown")]);
+        assert.equal(exportButton.getAttribute("aria-expanded"), "true");
+        const csvMenu = menu.items[1].child!;
+        const markdownMenu = menu.items[2].child!;
         assert.equal(csvMenu.useNativeMenu, false);
         assert.deepEqual(csvMenu.items.map((item) => item.title), [t("Current view"), t("All fields and records")]);
         assert.equal(markdownMenu.useNativeMenu, false);
@@ -2268,6 +2383,99 @@ test("[import-export][localization] export menu offers file and copy actions und
       } finally { ui.cleanup(); }
     }
   } finally { setLanguage(previousLocale); }
+});
+test("[table-block][views][localization] table actions copy all data and use the currently displayed view without saving the source", async () => {
+  const previousLocale = getLocale(); const originalWrite = navigator.clipboard.writeText;
+  try {
+    for (const language of ["en", "zh-CN"]) {
+      setLanguage(language);
+      const table = readTable(JSON.stringify(fixtureWithOpaqueData()));
+      table.views.push({ id: "copy-view", name: "Copy view", filters: emptyFilters(), visibleFieldIds: [] });
+      const source = JSON.stringify(table);
+      const ui = mount(table, true);
+      let copied = "";
+      navigator.clipboard.writeText = async (text) => { copied = text; };
+      try {
+        click(ui.root.querySelector(".tb-view-menu-button")!);
+        shownMenus.at(-1)!.items.find((item) => item.title === "Copy view")!.action!({});
+        click(byLabel(ui.root, t("Table actions")));
+        const menu = shownMenus.at(-1)!;
+        await menu.items.find((item) => item.title === t("Copy table"))!.action!({});
+        const result = readTable(scanFencedBlocks(copied)[0].body);
+        assert.ok(copied.endsWith("\n\n"), "leave a body cursor outside the block for the next paste");
+        assert.ok(prepareTablePaste(copied, copied, copied.length, copied.length), "immediately pasting the same clipboard again must allocate a new ID");
+        assert.notEqual(result.tableId, table.tableId);
+        assert.equal(result.defaultViewId, "copy-view");
+        assert.deepEqual({ ...result, tableId: table.tableId, defaultViewId: table.defaultViewId }, table);
+        assert.equal(JSON.stringify(table), source);
+        assert.equal(ui.saved(), null);
+        assert.equal(notices.at(-1), t("Table copied. Paste it into a note to create an independent copy."));
+        menu.hide();
+        assert.equal(byLabel(ui.root, t("Table actions")).getAttribute("aria-expanded"), "false");
+      } finally { ui.cleanup(); }
+    }
+  } finally { navigator.clipboard.writeText = originalWrite; setLanguage(previousLocale); }
+});
+test("[table-block][storage] whole-table copy waits for a pending edit and refuses stale data after a save failure", async () => {
+  const originalWrite = navigator.clipboard.writeText;
+  try {
+    for (const fail of [false, true]) {
+      const table = fixture(); delete table.views[0].sort; delete table.views[0].group;
+      const root = document.createElement("div"); document.body.append(root);
+      let finishSave!: () => void;
+      const gate = new Promise<void>((resolve) => { finishSave = resolve; });
+      const controller = renderTable({ app: {} } as any, JSON.stringify(table), {
+        root, sourcePath: "pending-copy.md", save: async (_, next) => {
+          await gate; if (fail) throw new Error("conflict"); return JSON.stringify(next);
+        },
+      });
+      const copied: string[] = []; navigator.clipboard.writeText = async (text) => { copied.push(text); };
+      try {
+        click(byLabel(root, "Table actions"));
+        const copy = shownMenus.at(-1)!.items.find((item) => item.title === "Copy table")!;
+        const input = openMarkdownEditor(root.querySelector<HTMLTableCellElement>("td.tb-cell")!);
+        input.value = "Latest committed edit"; input.blur();
+        const pending = copy.action!({});
+        await Promise.resolve(); assert.equal(copied.length, 0);
+        finishSave(); await pending;
+        if (fail) {
+          assert.equal(copied.length, 0);
+          assert.match(notices.at(-1)!, /Could not copy table/);
+        } else {
+          assert.equal(copied.length, 1);
+          assert.equal(readTable(scanFencedBlocks(copied[0])[0].body).records[0].values[table.fields[0].id], "Latest committed edit");
+        }
+      } finally { finishSave(); controller.destroy(); root.remove(); }
+    }
+  } finally { navigator.clipboard.writeText = originalWrite; }
+});
+test("[table-block][interaction] editor paste repairs collisions in one edit and respects input, table, handled and multiple-selection boundaries", async () => {
+  const handlers = new Map<string, (...args: any[]) => void>();
+  const plugin = new SuperTablePlugin({ workspace: { on: (name: string, handler: (...args: any[]) => void) => { handlers.set(name, handler); return {}; } } } as any, {} as any);
+  await plugin.onload(); const handle = handlers.get("editor-paste")!;
+  const source = serializeTable(fixture()); let note = source + "\n\n"; let changes = 0;
+  let selections = [{ anchor: { line: 0, ch: note.length }, head: { line: 0, ch: note.length } }];
+  const editor = {
+    getValue: () => note, listSelections: () => selections, posToOffset: (position: { ch: number }) => position.ch,
+    replaceSelection: (text: string, origin: string) => { assert.equal(origin, "input.paste"); changes++; note += text; },
+  };
+  const surface = document.createElement("div"); surface.className = "cm-content"; surface.setAttribute("contenteditable", "true"); document.body.append(surface);
+  const makeEvent = (target: Element = surface) => pasteClipboardText(target, source);
+  try {
+    const handled = makeEvent(); handled.preventDefault(); handle(handled, editor); assert.equal(changes, 0);
+    selections.push(selections[0]); handle(makeEvent(), editor); assert.equal(changes, 0); selections.pop();
+    for (const tag of ["input", "textarea", "select", "div"]) {
+      const target = document.createElement(tag); if (tag === "div") target.className = "tablebase-root";
+      surface.append(target); handle(makeEvent(target), editor); target.remove(); assert.equal(changes, 0);
+    }
+    const event = makeEvent(); handle(event, editor);
+    assert.equal(event.defaultPrevented, true); assert.equal(changes, 1);
+    const tables = scanFencedBlocks(note).map((block) => readTable(block.body));
+    assert.notEqual(tables[0].tableId, tables[1].tableId);
+    note = ""; selections = [{ anchor: { line: 0, ch: 0 }, head: { line: 0, ch: 0 } }];
+    const ordinary = makeEvent(); handle(ordinary, editor);
+    assert.equal(ordinary.defaultPrevented, false); assert.equal(changes, 1);
+  } finally { surface.remove(); }
 });
 test("[import-export] Markdown copy actions use the view projection or full stored table and report clipboard errors", async () => {
   const previousLocale = getLocale();
@@ -2294,7 +2502,7 @@ test("[import-export] Markdown copy actions use the view projection or full stor
     delete view.group;
     ui = mount(table, true);
 
-    click(byLabel(ui.root, "Export"));
+    click(byLabel(ui.root, "Table actions"));
     const markdownMenu = shownMenus.at(-1)!.items.find((item) => item.title === t("Export Markdown"))!.child!;
     const copyCurrent = markdownMenu.items.find((item) => item.title === t("Copy current view"))!;
     const copyAll = markdownMenu.items.find((item) => item.title === t("Copy all fields and records"))!;
@@ -2336,7 +2544,7 @@ test("[import-export][interaction] clipboard fallback cleans up and restores foc
       const ui = mount(fixture(), true);
       const previous = document.createElement("input"); document.body.append(previous);
       try {
-        click(byLabel(ui.root, "Export"));
+        click(byLabel(ui.root, "Table actions"));
         const menu = shownMenus.at(-1)!.items.find((item) => item.title === t("Export Markdown"))!.child!;
         const copy = menu.items.find((item) => item.title === t("Copy current view"))!;
         previous.focus();
@@ -4729,6 +4937,44 @@ test("[interaction] Markdown text cells select on the first pointer click and ed
     assert.equal(ui.saved(), null, "cancelling the test edit must not save");
   } finally { ui.cleanup(); }
 });
+test("[interaction] rapid text and number clicks suppress native selection across the whole cell", () => {
+  const table = fixture();
+  table.fields.push({ id: "review", name: "Review", type: "text" }, { id: "quantity", name: "Quantity", type: "number" });
+  table.records[0].values.review = ""; table.records[0].values.quantity = "";
+  const ui = mount(table);
+  const mouseDown = (target: Element, detail: number, button = 0) => {
+    const event = new dom.window.MouseEvent("mousedown", { bubbles: true, cancelable: true, detail, button });
+    target.dispatchEvent(event); return event;
+  };
+  try {
+    for (const fieldId of [table.fields[0].id, "review", "quantity"]) {
+      const cell = ui.root.querySelector<HTMLTableCellElement>(`td[data-field-id="${fieldId}"]`)!;
+      const preview = cell.querySelector<HTMLElement>(".tb-markdown-content, .tb-number-preview")!;
+      pointerClick(cell);
+      for (const target of [cell, preview.parentElement!, preview]) {
+        assert.equal(mouseDown(target, 1).defaultPrevented, false, "single clicks retain normal focus behavior");
+        assert.equal(mouseDown(target, 2, 2).defaultPrevented, false, "context-menu presses are unchanged");
+        for (const detail of [2, 3]) {
+          assert.equal(mouseDown(target, detail).defaultPrevented, true, "multi-click selection must not move focus to a preceding editable cell");
+          assert.equal(document.activeElement, cell);
+        }
+      }
+      pointerClick(cell);
+      const input = cell.querySelector<HTMLInputElement | HTMLTextAreaElement>(".tb-cell-input")!;
+      assert.ok(input, "the next click still opens the editor");
+      assert.equal(document.activeElement, input);
+      assert.equal(mouseDown(input, 2).defaultPrevented, false, "native word selection inside the editor remains available");
+      input.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    }
+    const cell = ui.root.querySelector<HTMLTableCellElement>("td.tb-cell")!;
+    const grip = cell.querySelector(".tb-row-grip")!;
+    const task = document.createElement("button"); cell.querySelector(".tb-markdown-content")!.append(task);
+    for (const target of [grip, task]) {
+      assert.equal(mouseDown(target, 2).defaultPrevented, false, "cell controls retain their own behavior");
+    }
+    assert.equal(ui.saved(), null);
+  } finally { ui.cleanup(); }
+});
 test("[interaction][markdown] text selection released on the cell edge keeps the editor and selection", async () => {
   for (const endpoint of ["cell", "wrapper", "editor", "outside"] as const) for (const direction of ["backward", "forward"] as const) {
     const ui = mount();
@@ -6201,14 +6447,14 @@ test("[localization] Chinese renderer translates toolbar, menus, option colors a
   setLanguage("zh-CN"); const ui = mount();
   try {
     const labels = [...ui.root.querySelectorAll(".tb-toolbar button:not(.tb-view-menu-button) span:not(:has(svg))")].map((element) => element.textContent || "");
-    assert.deepEqual(labels.filter((label) => !/^粘贴 \d+ 行$/.test(label)), ["显示配置", "新增行", "新增列", "筛选", "分组", "搜索", "导出", "选择"]);
+    assert.deepEqual(labels.filter((label) => !/^粘贴 \d+ 行$/.test(label)), ["显示配置", "新增行", "新增列", "筛选", "分组", "搜索", "选择", "表格操作"]);
     assert.equal(ui.root.querySelector<HTMLTextAreaElement>(".tb-field-name")!.value, "名称");
     assert.equal(ui.root.querySelector(".tb-choice-label")!.textContent, "PC");
-    click(byLabel(ui.root, "导出"));
+    click(byLabel(ui.root, "表格操作"));
     const exportMenu = shownMenus.at(-1)!;
-    assert.deepEqual(exportMenu.items.map((item) => item.title), ["导出 CSV", "导出 Markdown"]);
-    assert.deepEqual(exportMenu.items[0].child!.items.map((item) => item.title), ["当前视图", "全部字段和记录"]);
-    assert.deepEqual(exportMenu.items[1].child!.items.map((item) => item.title), [
+    assert.deepEqual(exportMenu.items.map((item) => item.title), ["复制表格", "导出 CSV", "导出 Markdown"]);
+    assert.deepEqual(exportMenu.items[1].child!.items.map((item) => item.title), ["当前视图", "全部字段和记录"]);
+    assert.deepEqual(exportMenu.items[2].child!.items.map((item) => item.title), [
       "当前视图", "全部字段和记录", "复制当前视图", "复制全部字段和记录",
     ]);
     exportMenu.hide();

@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Super Table adds editable data tables to your Obsidian notes, with typed fields, filtering, sorting, grouping, and multiple views. Table data and view settings stay in the current Markdown note.
+Super Table adds Notion-style database tables to your Obsidian notes, with typed fields, filtering, sorting, grouping, and multiple views. Table data and view settings stay in the current Markdown note.
 
 ![Super Table with a launch planner, typed fields, and multiple views](docs/images/overview.png)
 
